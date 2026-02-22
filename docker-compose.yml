@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  # The scalerunnergh orchestrator
+  scalerunnergh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scalerunnergh
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.json:/etc/scalerunnergh/config.json:ro
+    command: ["--config", "/etc/scalerunnergh/config.json"]
+    environment:
+      - LOG_LEVEL=info
+    ports:
+      - "9090:9090" # Metrics endpoint
+    networks:
+      - monitoring
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9091:9090"
+    networks:
+      - monitoring
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  monitoring:
+    driver: bridge

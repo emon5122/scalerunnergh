@@ -1,0 +1,48 @@
+{
+    "repos": [
+        {
+            "owner": "my-org",
+            "repo": "my-app",
+            "labels": [
+                "self-hosted",
+                "gpu",
+                "docker"
+            ]
+        },
+        {
+            "owner": "my-org",
+            "repo": "my-api",
+            "labels": [
+                "self-hosted",
+                "cpu"
+            ]
+        },
+        {
+            "owner": "another-org",
+            "repo": "",
+            "labels": [
+                "self-hosted"
+            ],
+            "pat": "ghp_org_specific_token_here"
+        }
+    ],
+    "global_pat": "ghp_your_global_token_here",
+    "poll_interval": "10s",
+    "resources": {
+        "max_runners": 10,
+        "max_gpus": 4,
+        "max_cpus": 32,
+        "max_mem_mb": 65536
+    },
+    "docker": {
+        "image": "scalerunnergh-runner:latest",
+        "gpu_enabled": true,
+        "network_mode": "bridge",
+        "extra_args": []
+    },
+    "metrics": {
+        "enabled": true,
+        "address": ":9090"
+    },
+    "log_level": "info"
+}

@@ -1,0 +1,245 @@
+{
+    "annotations": {
+        "list": []
+    },
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 1,
+    "id": null,
+    "links": [],
+    "panels": [
+        {
+            "title": "Active Runners",
+            "type": "stat",
+            "gridPos": {
+                "h": 4,
+                "w": 6,
+                "x": 0,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "expr": "scalerunner_active_runners",
+                    "legendFormat": "Active"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "yellow",
+                                "value": 5
+                            },
+                            {
+                                "color": "red",
+                                "value": 8
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "title": "Queued Jobs",
+            "type": "stat",
+            "gridPos": {
+                "h": 4,
+                "w": 6,
+                "x": 6,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "expr": "scalerunner_queued_jobs",
+                    "legendFormat": "Queued"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 3
+                            },
+                            {
+                                "color": "red",
+                                "value": 10
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "title": "GPU Utilization",
+            "type": "gauge",
+            "gridPos": {
+                "h": 4,
+                "w": 6,
+                "x": 12,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "expr": "scalerunner_used_gpus / (scalerunner_used_gpus + scalerunner_available_gpus) * 100",
+                    "legendFormat": "GPU %"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "max": 100,
+                    "min": 0,
+                    "unit": "percent",
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "yellow",
+                                "value": 60
+                            },
+                            {
+                                "color": "red",
+                                "value": 85
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "title": "Total Launched / Completed / Failed",
+            "type": "stat",
+            "gridPos": {
+                "h": 4,
+                "w": 6,
+                "x": 18,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "expr": "scalerunner_total_launched",
+                    "legendFormat": "Launched"
+                },
+                {
+                    "expr": "scalerunner_total_completed",
+                    "legendFormat": "Completed"
+                },
+                {
+                    "expr": "scalerunner_total_failed",
+                    "legendFormat": "Failed"
+                }
+            ]
+        },
+        {
+            "title": "Runners Over Time",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 4
+            },
+            "targets": [
+                {
+                    "expr": "scalerunner_active_runners",
+                    "legendFormat": "Active Runners"
+                },
+                {
+                    "expr": "scalerunner_queued_jobs",
+                    "legendFormat": "Queued Jobs"
+                }
+            ]
+        },
+        {
+            "title": "GPU Usage Over Time",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 4
+            },
+            "targets": [
+                {
+                    "expr": "scalerunner_used_gpus",
+                    "legendFormat": "Used GPUs"
+                },
+                {
+                    "expr": "scalerunner_available_gpus",
+                    "legendFormat": "Available GPUs"
+                }
+            ]
+        },
+        {
+            "title": "Queued Jobs by Repo",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 12
+            },
+            "targets": [
+                {
+                    "expr": "scalerunner_repo_queued_jobs",
+                    "legendFormat": "{{ repo }}"
+                }
+            ]
+        },
+        {
+            "title": "Error Rates",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 12
+            },
+            "targets": [
+                {
+                    "expr": "rate(scalerunner_poll_errors_total[5m])",
+                    "legendFormat": "Poll Errors/s"
+                },
+                {
+                    "expr": "rate(scalerunner_launch_errors_total[5m])",
+                    "legendFormat": "Launch Errors/s"
+                },
+                {
+                    "expr": "rate(scalerunner_token_errors_total[5m])",
+                    "legendFormat": "Token Errors/s"
+                }
+            ]
+        }
+    ],
+    "schemaVersion": 39,
+    "tags": [
+        "scalerunnergh",
+        "github-actions",
+        "runners"
+    ],
+    "templating": {
+        "list": []
+    },
+    "time": {
+        "from": "now-1h",
+        "to": "now"
+    },
+    "title": "ScaleRunnerGH - Runner Orchestrator",
+    "uid": "scalerunnergh-main"
+}
