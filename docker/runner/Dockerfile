@@ -1,5 +1,5 @@
 # Runner images for the docker backend: one ephemeral GitHub Actions runner
-# per container. Build a flavor with --target (base, node, go, python, media, full).
+# per container. Build a flavor with --target (base, node, go, python, media, full, rust).
 #
 # The runner and the language toolchains are pinned by version and sha256 here;
 # bump them through Renovate, never on a host. Ubuntu and Docker packages come
@@ -121,3 +121,43 @@ COPY --from=python /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv python3-pip python3-dev \
     && rm -rf /var/lib/apt/lists/*
 ENV PATH=/usr/local/go/bin:/home/runner/go/bin:$PATH
+
+# ---- rust: full + rustup + clang/lld 21, cmake, glib headers (wa-gateway) ----
+# Jobs get no sudo, so everything a Rust job used to apt-get at run time is here.
+# The toolchain itself follows each repo's rust-toolchain.toml (rustup installs it
+# on first use inside the job).
+FROM full AS rust
+ARG LLVM_VERSION=21
+# apt.llvm.org signing key (Sylvestre Ledru): only this fingerprint is trusted
+ARG LLVM_SIGNER_FPR=6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+# renovate: datasource=github-tags depName=rust-lang/rustup
+ARG RUSTUP_VERSION=1.28.2
+ARG RUSTUP_SHA256_AMD64=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+ARG RUSTUP_SHA256_ARM64=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c
+RUN set -eux; \
+    curl -fsSL -o /tmp/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key; \
+    export GNUPGHOME="$(mktemp -d)"; \
+    gpg --batch --import /tmp/llvm.asc; \
+    gpg --batch --export "${LLVM_SIGNER_FPR}" > /etc/apt/keyrings/llvm.gpg; \
+    [ -s /etc/apt/keyrings/llvm.gpg ]; \
+    rm -rf "${GNUPGHOME}" /tmp/llvm.asc; unset GNUPGHOME; \
+    echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_VERSION} main" \
+        > /etc/apt/sources.list.d/llvm.list; \
+    apt-get update; apt-get install -y --no-install-recommends \
+        clang-${LLVM_VERSION} lld-${LLVM_VERSION} cmake libglib2.0-dev sqlite3 shellcheck lsb-release wget; \
+    rm -rf /var/lib/apt/lists/*; \
+    clang-${LLVM_VERSION} --version
+USER runner
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+        amd64) a=x86_64; sha="${RUSTUP_SHA256_AMD64}" ;; \
+        arm64) a=aarch64; sha="${RUSTUP_SHA256_ARM64}" ;; \
+    esac; \
+    curl -fsSL -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${a}-unknown-linux-gnu/rustup-init"; \
+    echo "${sha}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --profile minimal --default-toolchain none --no-modify-path; \
+    rm /tmp/rustup-init; \
+    /home/runner/.cargo/bin/rustup --version
+USER root
+ENV PATH=/home/runner/.cargo/bin:$PATH

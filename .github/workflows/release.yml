@@ -75,7 +75,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                flavor: [base, node, go, python, media, full]
+                flavor: [base, node, go, python, media, full, rust]
         steps:
             - uses: actions/checkout@v6
             - uses: docker/setup-buildx-action@v4

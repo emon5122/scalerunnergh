@@ -199,6 +199,7 @@ rm /srv/scalerunnergh/control/STOP      # resume
 | `python` | base + Python 3, uv |
 | `media` | node + ffmpeg, sox |
 | `full` | node + Go + Python + ffmpeg |
+| `rust` | full + rustup (toolchain from the repo's `rust-toolchain.toml`), clang/lld 21, cmake, glib headers, sqlite3, shellcheck |
 
 There is no `sudo` in the images: tools come from the image, pinned in the Dockerfile.
 The images only start through ScaleRunnerGH (the entrypoint needs the JIT config file).
