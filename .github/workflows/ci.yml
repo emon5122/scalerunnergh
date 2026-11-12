@@ -7,6 +7,8 @@ on:
         branches: [main]
     push:
         tags: ["v*"]
+    # Release PRs opened by release-please with GITHUB_TOKEN get no
+    # pull_request event; release-please.yml dispatches CI on their branch.
     workflow_dispatch:
 
 permissions:

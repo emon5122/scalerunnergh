@@ -5,6 +5,9 @@ name: Release
 on:
     push:
         tags: ["v*"]
+    # Tags created by release-please with GITHUB_TOKEN fire no push event;
+    # release-please.yml dispatches this workflow on the tag instead.
+    workflow_dispatch:
 
 # Least privilege: each job asks for what it needs.
 permissions:
@@ -16,6 +19,8 @@ env:
 
 jobs:
     test:
+        # Only ever for a version tag (a manual dispatch on a branch does nothing).
+        if: startsWith(github.ref, 'refs/tags/v')
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v6
@@ -48,6 +53,8 @@ jobs:
                       type=semver,pattern={{version}}
                       type=semver,pattern={{major}}.{{minor}}
                       type=semver,pattern={{major}}
+            - id: when
+              run: echo "now=$(date -u +%FT%TZ)" >> "$GITHUB_OUTPUT"
             - uses: docker/build-push-action@v7
               with:
                   context: .
@@ -57,7 +64,7 @@ jobs:
                   labels: ${{ steps.meta.outputs.labels }}
                   build-args: |
                       VERSION=${{ github.ref_name }}
-                      BUILD_TIME=${{ github.event.head_commit.timestamp }}
+                      BUILD_TIME=${{ steps.when.outputs.now }}
 
     runner-images:
         runs-on: ubuntu-latest

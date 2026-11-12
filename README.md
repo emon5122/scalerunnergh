@@ -245,8 +245,10 @@ deploy/, examples/     compose, systemd, Windows service, example configs
 docs/rollout-plan.md   audit, design decisions and rollout plan
 ```
 
-Releases are cut by release-please; a version tag publishes the images to ghcr and attaches
-the binaries to the GitHub release.
+Releases are cut by release-please on the built-in `GITHUB_TOKEN` (the repo setting "Allow
+GitHub Actions to create and approve pull requests" must be on). It dispatches CI on the
+release PR branch and, after the merge, the release build on the new tag, which publishes
+the images to ghcr and attaches the binaries to the GitHub release.
 
 ## License
 
