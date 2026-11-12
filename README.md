@@ -152,6 +152,7 @@ One JSON file per host. Unknown fields are errors. Validate with
 | `docker.extra_args` | Extra `docker create` flags (escape hatch) |
 | `native.root` | Directory for the runner release, job directories and logs |
 | `native.runner_version`, `native.runner_sha256` | Pinned `actions/runner` release for this OS and architecture |
+| `native.env` | Extra environment for every native runner (toolchain paths such as `JAVA_HOME`, runner hooks such as `ACTIONS_RUNNER_HOOK_JOB_STARTED`). The inherited environment drops `ACTIONS_*`, `GITHUB_*`, `SRG_*` and credential-looking names, so set those here. Never secrets |
 
 ## Safety model
 

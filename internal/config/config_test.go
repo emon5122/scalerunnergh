@@ -144,3 +144,28 @@ func TestDurationJSON(t *testing.T) {
 		t.Error("bool must fail")
 	}
 }
+
+func TestNativeEnvValidation(t *testing.T) {
+	sha := strings.Repeat("ab", 32)
+	base := `{"host": {"name": "pc09", "max_runners": 1},
+	  "auth": {"app": {"client_id": "Iv1", "installation_id": 7, "private_key_file": "k.pem"}},
+	  "native": {"root": "/srv/srg", "runner_version": "2.338.2", "runner_sha256": "` + sha + `", "env": ENV},
+	  "scale_sets": [{"name": "w", "url": "https://github.com/o/r", "runner_group": "g", "backend": "native"}]}`
+	for env, want := range map[string]string{
+		`{"": "x"}`:    "native.env",
+		`{"A=B": "x"}`: "native.env",
+		`{"ACTIONS_RUNNER_INPUT_JITCONFIG": "x"}`: "ACTIONS_RUNNER_INPUT_JITCONFIG",
+		`{"A": "x\u0000y"}`:                       "NUL",
+	} {
+		if _, err := Parse([]byte(strings.Replace(base, "ENV", env, 1))); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("env %s: want %q, got %v", env, want, err)
+		}
+	}
+	cfg, err := Parse([]byte(strings.Replace(base, "ENV", `{"ACTIONS_RUNNER_HOOK_JOB_STARTED": "/opt/h.sh"}`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Native.Env["ACTIONS_RUNNER_HOOK_JOB_STARTED"] != "/opt/h.sh" {
+		t.Error("env not parsed")
+	}
+}

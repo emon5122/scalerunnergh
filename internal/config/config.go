@@ -151,6 +151,11 @@ type NativeBackendConfig struct {
 	RunnerSHA256 string `json:"runner_sha256,omitempty"`
 	// RunnerURL overrides the download URL (mirrors, tests).
 	RunnerURL string `json:"runner_url,omitempty"`
+	// Env is set for every native runner, on top of the orchestrator's filtered
+	// environment (which drops ACTIONS_*, GITHUB_*, SRG_* and anything that looks
+	// like a credential). Use it for toolchain paths (JAVA_HOME, ANDROID_HOME) and
+	// runner hooks (ACTIONS_RUNNER_HOOK_JOB_STARTED / _COMPLETED). Never secrets.
+	Env map[string]string `json:"env,omitempty"`
 }
 
 // MetricsConfig configures the Prometheus/health endpoint.
@@ -324,6 +329,17 @@ func (c *Config) Validate() error {
 		c.Native.RunnerSHA256 = strings.ToLower(c.Native.RunnerSHA256)
 		if !sha256Re.MatchString(c.Native.RunnerSHA256) {
 			return errors.New("config: native.runner_sha256 must be the 64-hex sha256 of the runner archive")
+		}
+		for k, v := range c.Native.Env {
+			if k == "" || strings.ContainsAny(k, "=\x00") {
+				return fmt.Errorf("config: native.env: invalid variable name %q", k)
+			}
+			if strings.ContainsRune(v, 0) {
+				return fmt.Errorf("config: native.env: value of %s contains NUL", k)
+			}
+			if strings.EqualFold(k, "ACTIONS_RUNNER_INPUT_JITCONFIG") {
+				return errors.New("config: native.env must not set ACTIONS_RUNNER_INPUT_JITCONFIG")
+			}
 		}
 	}
 	return nil

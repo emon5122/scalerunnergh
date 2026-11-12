@@ -95,7 +95,7 @@ func (n *Native) Start(ctx context.Context, spec RunnerSpec) (Handle, error) {
 
 	cmd := runnerCommand(dir)
 	cmd.Dir = dir
-	cmd.Env = append(FilterEnv(os.Environ()), "ACTIONS_RUNNER_INPUT_JITCONFIG="+spec.JITConfig)
+	cmd.Env = runnerEnv(os.Environ(), n.cfg.Env, spec.JITConfig)
 	cmd.Stdout, cmd.Stderr = logf, logf
 	setProcAttrs(cmd, spec.Limits.Nice)
 	if err := cmd.Start(); err != nil {
@@ -242,6 +242,28 @@ func removeAll(dir string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return err
+}
+
+// runnerEnv is the filtered orchestrator environment, then the configured
+// native.env (it wins over inherited values), then the JIT config last.
+func runnerEnv(base []string, extra map[string]string, jit string) []string {
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	env := FilterEnv(base)
+	out := make([]string, 0, len(env)+len(keys)+1)
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		if _, ok := extra[k]; !ok {
+			out = append(out, kv)
+		}
+	}
+	for _, k := range keys {
+		out = append(out, k+"="+extra[k])
+	}
+	return append(out, "ACTIONS_RUNNER_INPUT_JITCONFIG="+jit)
 }
 
 // FilterEnv drops credentials and orchestrator settings from the environment

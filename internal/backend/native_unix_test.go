@@ -151,3 +151,26 @@ func TestNativeCleanupRemovesLeftovers(t *testing.T) {
 		t.Fatal("Stop must refuse a dir outside jobs/")
 	}
 }
+
+func TestNativeEnvFromConfig(t *testing.T) {
+	t.Setenv("ACTIONS_RUNNER_HOOK_JOB_STARTED", "/from/orchestrator/env")
+	out := filepath.Join(t.TempDir(), "seen")
+	cfg := fakeRunner(t, `echo "hook=$ACTIONS_RUNNER_HOOK_JOB_STARTED java=$JAVA_HOME jit=$ACTIONS_RUNNER_INPUT_JITCONFIG" > "`+out+`"
+`)
+	cfg.Env = map[string]string{
+		"ACTIONS_RUNNER_HOOK_JOB_STARTED": "/opt/hooks/start.sh",
+		"JAVA_HOME":                       "/usr/lib/jvm/17",
+	}
+	n := NewNative(cfg, nil)
+	ctx := context.Background()
+	h, err := n.Start(ctx, RunnerSpec{Name: "srg-h-s-env1", JITConfig: "JITX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.Wait(ctx, h)
+	n.Stop(ctx, h)
+	seen, _ := os.ReadFile(out)
+	if want := "hook=/opt/hooks/start.sh java=/usr/lib/jvm/17 jit=JITX"; strings.TrimSpace(string(seen)) != want {
+		t.Fatalf("runner saw %q, want %q", seen, want)
+	}
+}
