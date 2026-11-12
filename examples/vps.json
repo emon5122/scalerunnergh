@@ -3,6 +3,7 @@
     "name": "vps",
     "max_runners": 3,
     "max_heavy": 1,
+    "kill_switch_file": "/control/STOP",
     "drain_timeout": "45m"
   },
   "auth": { "pat_file": "/run/secrets/github_pat" },

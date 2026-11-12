@@ -5,7 +5,7 @@
     "max_heavy": 1,
     "max_load_per_core": 0.7,
     "min_mem_available_mb": 4096,
-    "kill_switch_file": "/etc/scalerunnergh/STOP",
+    "kill_switch_file": "/control/STOP",
     "kill_switch_stops_running": true,
     "max_job_duration": "2h",
     "drain_timeout": "30m"

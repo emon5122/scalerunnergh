@@ -200,9 +200,12 @@ Defence in depth:
   release-please and CI, and carries DockWarden labels.
 - Per-host `compose.yml` and the non-secret config live in the private infra repo for that
   host (nexis-infra for the VPS, home-infra or titli for pc-09). Secrets come from Bitwarden.
-- On startup the orchestrator removes every container labelled `scalerunner=true` that it
-  does not own, and deletes offline runners of its own scale sets. That makes it safe to
-  restart.
+- On startup the orchestrator removes every runner container of this host (label
+  `scalerunner.host`) and every leftover native job dir, so it is safe to restart. A runner
+  that never ran a job is unregistered when it is removed; registrations orphaned by a
+  crash are ephemeral and GitHub drops them after a day offline.
+- On shutdown (`drain_timeout`) it takes no new jobs and lets running jobs finish, so a
+  DockWarden image update does not kill CI.
 - It keeps the Prometheus `/metrics` endpoint. Optionally it pushes status to the hub.
 
 ### 3.8 Runner backends: docker | native (Linux and Windows)
@@ -226,7 +229,7 @@ type Backend interface {
 | Backend | Runs where | Job isolation | Limits | Toolchain |
 |---|---|---|---|---|
 | `docker` | Linux hosts with Docker | One container per job (create, copy the JIT config in, start), removed with its anonymous volumes afterwards. With `dind: true`, a dockerd runs **inside** that one container, so one set of limits covers the job and every container it starts. No host socket. | `--cpus`, `--memory` (swap = memory), `--pids-limit`, `--cpu-shares`, `--oom-score-adj`, `--blkio-weight`, optional `--storage-opt size` | pinned image per scale set (§3.6) |
-| `native` (`native-linux`) | Linux host or WSL, no Docker needed | A runner process per job in a fresh `jobs/<runner>/` dir: a hardlink copy of the pinned actions-runner release, with its own `_work`. The dir is deleted after the job and the process group is killed. | concurrency (slot pool), `nice` level | whatever the host has (provisioned by the infra repo) |
+| `native` (`native-linux`) | Linux host or WSL, no Docker needed | A runner process per job in a fresh `jobs/<runner>/` dir: a full copy of the pinned actions-runner release (no hardlinks, so a job cannot alter the shared release), with its own `_work`. The dir is deleted after the job and the process group is killed. | concurrency (slot pool), `nice` level | whatever the host has (provisioned by the infra repo) |
 | `native` (`native-windows`) | Windows host, as a Windows service | Same per-job dir. `run.cmd` runs per job; the process tree is killed with `taskkill /T /F`. | concurrency (slot pool), below-normal priority class | host-installed (VS Build Tools etc.) |
 
 Details:
