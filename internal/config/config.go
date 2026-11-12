@@ -156,7 +156,15 @@ type NativeBackendConfig struct {
 	// like a credential). Use it for toolchain paths (JAVA_HOME, ANDROID_HOME) and
 	// runner hooks (ACTIONS_RUNNER_HOOK_JOB_STARTED / _COMPLETED). Never secrets.
 	Env map[string]string `json:"env,omitempty"`
+	// RunAs runs every job as this built-in service account instead of the
+	// orchestrator's own (Windows only, one of RunAsAccounts; the service
+	// itself runs as LocalSystem). Jobs then cannot read credential files
+	// that only SYSTEM and Administrators may read.
+	RunAs string `json:"run_as,omitempty"`
 }
+
+// RunAsAccounts are the accounts native.run_as accepts.
+var RunAsAccounts = []string{`NT AUTHORITY\NETWORK SERVICE`, `NT AUTHORITY\LOCAL SERVICE`}
 
 // MetricsConfig configures the Prometheus/health endpoint.
 type MetricsConfig struct {
@@ -339,6 +347,20 @@ func (c *Config) Validate() error {
 			}
 			if strings.EqualFold(k, "ACTIONS_RUNNER_INPUT_JITCONFIG") {
 				return errors.New("config: native.env must not set ACTIONS_RUNNER_INPUT_JITCONFIG")
+			}
+		}
+		if c.Native.RunAs != "" {
+			ok := false
+			for _, a := range RunAsAccounts {
+				if strings.EqualFold(c.Native.RunAs, a) {
+					c.Native.RunAs, ok = a, true
+				}
+			}
+			if !ok {
+				return fmt.Errorf("config: native.run_as must be one of %q", RunAsAccounts)
+			}
+			if !windowsAbs(c.Native.Root) {
+				return errors.New("config: native.run_as needs an absolute Windows native.root (C:\\...)")
 			}
 		}
 	}

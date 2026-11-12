@@ -122,7 +122,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
     && rm -rf /var/lib/apt/lists/*
 ENV PATH=/usr/local/go/bin:/home/runner/go/bin:$PATH
 
-# ---- rust: full + rustup + clang/lld 21, cmake, glib headers (wa-gateway) ----
+# ---- rust: full + rustup + clang/lld 21, cmake, glib headers (wa-gateway), ----
+# ---- and the Tauri v2 Linux build libraries (radiolens viewer/router) -------
 # Jobs get no sudo, so everything a Rust job used to apt-get at run time is here.
 # The toolchain itself follows each repo's rust-toolchain.toml (rustup installs it
 # on first use inside the job).
@@ -144,7 +145,9 @@ RUN set -eux; \
     echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_VERSION} main" \
         > /etc/apt/sources.list.d/llvm.list; \
     apt-get update; apt-get install -y --no-install-recommends \
-        clang-${LLVM_VERSION} lld-${LLVM_VERSION} cmake libglib2.0-dev sqlite3 shellcheck lsb-release wget; \
+        clang-${LLVM_VERSION} lld-${LLVM_VERSION} cmake libglib2.0-dev sqlite3 shellcheck lsb-release wget \
+        libudev-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsoup-3.0-dev \
+        libjavascriptcoregtk-4.1-dev libssl-dev file; \
     rm -rf /var/lib/apt/lists/*; \
     clang-${LLVM_VERSION} --version
 USER runner

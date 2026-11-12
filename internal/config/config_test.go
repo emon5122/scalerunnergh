@@ -169,3 +169,21 @@ func TestNativeEnvValidation(t *testing.T) {
 		t.Error("env not parsed")
 	}
 }
+
+func TestNativeRunAsValidation(t *testing.T) {
+	sha := strings.Repeat("ab", 32)
+	base := `{"host": {"name": "pc09", "max_runners": 1},
+	  "auth": {"app": {"client_id": "Iv1", "installation_id": 7, "private_key_file": "k.pem"}},
+	  "native": {"root": "C:\\srg", "runner_version": "2.338.2", "runner_sha256": "` + sha + `", "run_as": RUNAS},
+	  "scale_sets": [{"name": "w", "url": "https://github.com/o/r", "runner_group": "g", "backend": "native"}]}`
+	if _, err := Parse([]byte(strings.Replace(base, "RUNAS", `"Administrator"`, 1))); err == nil || !strings.Contains(err.Error(), "run_as") {
+		t.Fatalf("want run_as error, got %v", err)
+	}
+	cfg, err := Parse([]byte(strings.Replace(base, "RUNAS", `"nt authority\\network service"`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Native.RunAs != `NT AUTHORITY\NETWORK SERVICE` {
+		t.Fatalf("run_as not normalised: %q", cfg.Native.RunAs)
+	}
+}

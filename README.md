@@ -153,6 +153,7 @@ One JSON file per host. Unknown fields are errors. Validate with
 | `native.root` | Directory for the runner release, job directories and logs |
 | `native.runner_version`, `native.runner_sha256` | Pinned `actions/runner` release for this OS and architecture |
 | `native.env` | Extra environment for every native runner (toolchain paths such as `JAVA_HOME`, runner hooks such as `ACTIONS_RUNNER_HOOK_JOB_STARTED`). The inherited environment drops `ACTIONS_*`, `GITHUB_*`, `SRG_*` and credential-looking names, so set those here. Never secrets |
+| `native.run_as` | Windows only: run every job as `NT AUTHORITY\NETWORK SERVICE` (or `LOCAL SERVICE`) while the service runs as LocalSystem. `native.root` must be absolute; it is reset to SYSTEM and Administrators only, the jobs dir gets modify for that account, and each directory above it read/list for that directory only. Keep the credential file readable by SYSTEM and Administrators only. Windows PowerShell steps then need `"PSExecutionPolicyPreference": "Bypass"` in `native.env` unless the machine policy allows scripts |
 
 ## Safety model
 
@@ -168,7 +169,12 @@ One JSON file per host. Unknown fields are errors. Validate with
 - **Native mode shares the host and the service account** with the job: a workflow can
   read whatever that account can, including the credential file and the unpacked runner
   release. Use native mode only for repos you fully trust, under a dedicated unprivileged
-  account, with a credential scoped to that one org.
+  account, with a credential scoped to that one org. On Windows, `native.run_as` runs the
+  jobs under a service account with a restricted token (all privileges but
+  SeChangeNotify removed, so no SeImpersonate route to SYSTEM) and resets `native.root`
+  to SYSTEM and Administrators only, so a credential readable by SYSTEM and
+  Administrators only is out of a job's reach. Residual risk: a hostile job that leaves a
+  process outside the job's Job Object could race the job-dir deletion.
 - **`pull_request_target`, `workflow_run`, `issue_comment`** run the base repository's
   workflow, so the guard treats them as runs of the repository itself. Do not check out and
   run fork code in such workflows.
@@ -200,7 +206,7 @@ rm /srv/scalerunnergh/control/STOP      # resume
 | `python` | base + Python 3, uv |
 | `media` | node + ffmpeg, sox |
 | `full` | node + Go + Python + ffmpeg |
-| `rust` | full + rustup (toolchain from the repo's `rust-toolchain.toml`), clang/lld 21, cmake, glib headers, sqlite3, shellcheck |
+| `rust` | full + rustup (toolchain from the repo's `rust-toolchain.toml`), clang/lld 21, cmake, glib headers, sqlite3, shellcheck, Tauri v2 Linux build libraries (webkit2gtk 4.1, libsoup 3, appindicator, rsvg, udev, patchelf) |
 
 There is no `sudo` in the images: tools come from the image, pinned in the Dockerfile.
 The images only start through ScaleRunnerGH (the entrypoint needs the JIT config file).

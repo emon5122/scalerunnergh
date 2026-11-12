@@ -3,6 +3,7 @@
 package backend
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,9 +18,20 @@ func runnerCommand(dir string) *exec.Cmd {
 
 // setProcAttrs puts the runner in its own process group so the whole job
 // tree can be signalled.
-func setProcAttrs(cmd *exec.Cmd, nice int) {
+func setProcAttrs(cmd *exec.Cmd, nice int, _ *runAsAccount) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
+
+// runAsAccount is Windows-only (native.run_as); see proc_windows.go.
+type runAsAccount struct{}
+
+func openRunAs(name string) (*runAsAccount, error) {
+	return nil, errors.New("native.run_as is supported on Windows only")
+}
+
+func (*runAsAccount) env() map[string]string    { return nil }
+func (*runAsAccount) grantJobsDir(string) error { return nil }
+func (*runAsAccount) close()                    {}
 
 // procTree is the runner's process group.
 type procTree struct{ pgid int }

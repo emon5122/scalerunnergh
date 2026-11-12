@@ -31,6 +31,7 @@ type Native struct {
 	distOnce sync.Once
 	distDir  string
 	distErr  error
+	runAs    *runAsAccount // native.run_as (Windows), set by Prepare
 
 	mu    sync.Mutex
 	procs map[string]*nativeProc // job dir -> process
@@ -63,6 +64,18 @@ func (n *Native) logsDir() string { return filepath.Join(n.cfg.Root, "logs") }
 func (n *Native) Prepare(ctx context.Context) error {
 	n.distOnce.Do(func() {
 		n.distDir, n.distErr = runnerdist.Ensure(ctx, n.cfg.Root, n.cfg.RunnerVersion, n.cfg.RunnerSHA256, n.cfg.RunnerURL)
+		if n.distErr != nil || n.cfg.RunAs == "" {
+			return
+		}
+		if n.runAs, n.distErr = openRunAs(n.cfg.RunAs); n.distErr != nil {
+			return
+		}
+		if n.distErr = os.MkdirAll(n.jobsDir(), 0o755); n.distErr == nil {
+			n.distErr = n.runAs.grantJobsDir(n.jobsDir())
+		}
+		if n.distErr == nil {
+			n.logger.Info("native jobs run as", "account", n.cfg.RunAs)
+		}
 	})
 	return n.distErr
 }
@@ -95,9 +108,9 @@ func (n *Native) Start(ctx context.Context, spec RunnerSpec) (Handle, error) {
 
 	cmd := runnerCommand(dir)
 	cmd.Dir = dir
-	cmd.Env = runnerEnv(os.Environ(), n.cfg.Env, spec.JITConfig)
+	cmd.Env = runnerEnv(os.Environ(), n.jobEnv(), spec.JITConfig)
 	cmd.Stdout, cmd.Stderr = logf, logf
-	setProcAttrs(cmd, spec.Limits.Nice)
+	setProcAttrs(cmd, spec.Limits.Nice, n.runAs)
 	if err := cmd.Start(); err != nil {
 		logf.Close()
 		removeAll(dir)
@@ -242,6 +255,18 @@ func removeAll(dir string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return err
+}
+
+// jobEnv is native.env on top of the run_as account's profile variables.
+func (n *Native) jobEnv() map[string]string {
+	if n.runAs == nil {
+		return n.cfg.Env
+	}
+	m := n.runAs.env()
+	for k, v := range n.cfg.Env {
+		m[k] = v
+	}
+	return m
 }
 
 // runnerEnv is the filtered orchestrator environment, then the configured
