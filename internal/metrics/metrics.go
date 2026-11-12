@@ -1,86 +1,118 @@
-// Package metrics provides Prometheus metrics for the scalerunnergh orchestrator.
+// Package metrics exposes Prometheus-format metrics without external
+// dependencies: a few counters and gauges, labelled by scale set.
 package metrics
 
 import (
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
-	"sync/atomic"
 )
 
-// Collector holds all Prometheus-style metrics counters.
-// For simplicity and zero external dependencies in the core package,
-// we use simple atomic counters and expose them via a /metrics endpoint.
+// Metric names.
+const (
+	RunnersStarted   = "scalerunner_runners_started_total"
+	RunnersCompleted = "scalerunner_runners_completed_total"
+	RunnersFailed    = "scalerunner_runners_failed_total"
+	StartErrors      = "scalerunner_start_errors_total"
+	JobsRefused      = "scalerunner_jobs_refused_total"
+	ListenerErrors   = "scalerunner_listener_errors_total"
+	RunnersActive    = "scalerunner_runners_active"
+	RunnersBusy      = "scalerunner_runners_busy"
+	JobsAssigned     = "scalerunner_jobs_assigned"
+	CapacityBlocked  = "scalerunner_capacity_blocked"
+	HostSlotsUsed    = "scalerunner_host_slots_used"
+	HostSlotsMax     = "scalerunner_host_slots_max"
+	HostPaused       = "scalerunner_host_paused"
+)
+
+var help = map[string]string{
+	RunnersStarted:   "Runners started",
+	RunnersCompleted: "Runners that exited with code 0",
+	RunnersFailed:    "Runners that exited non-zero or were force-stopped",
+	StartErrors:      "Runner start errors (JIT config or backend)",
+	JobsRefused:      "Jobs refused by the guard (public repo, fork PR, not allowed)",
+	ListenerErrors:   "Message session errors (the listener restarts)",
+	RunnersActive:    "Runners currently alive",
+	RunnersBusy:      "Runners currently running a job",
+	JobsAssigned:     "Jobs GitHub has assigned to the scale set",
+	CapacityBlocked:  "1 while jobs wait for a host slot, the load gate or the kill switch",
+	HostSlotsUsed:    "Host slots in use",
+	HostSlotsMax:     "Host slots (host.max_runners)",
+	HostPaused:       "1 while the kill switch is on",
+}
+
+// Collector stores metric values.
 type Collector struct {
-	ActiveRunners  atomic.Int64
-	QueuedJobs     atomic.Int64
-	TotalLaunched  atomic.Int64
-	TotalCompleted atomic.Int64
-	TotalFailed    atomic.Int64
-	UsedGPUs       atomic.Int64
-	AvailableGPUs  atomic.Int64
-	PollErrors     atomic.Int64
-	LaunchErrors   atomic.Int64
-	TokenErrors    atomic.Int64
-
-	mu       sync.Mutex
-	repoJobs map[string]int64 // "owner/repo" -> queued count
+	mu     sync.Mutex
+	values map[string]map[string]float64 // name -> scale set ("" = host) -> value
 }
 
-// New creates a new metrics collector.
+// New creates a collector.
 func New() *Collector {
-	return &Collector{
-		repoJobs: make(map[string]int64),
+	return &Collector{values: map[string]map[string]float64{}}
+}
+
+// Add increments a counter.
+func (c *Collector) Add(name, scaleSet string, delta float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.series(name)[scaleSet] += delta
+}
+
+// Set sets a gauge.
+func (c *Collector) Set(name, scaleSet string, v float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.series(name)[scaleSet] = v
+}
+
+// Get returns a value (0 when unset).
+func (c *Collector) Get(name, scaleSet string) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.values[name][scaleSet]
+}
+
+func (c *Collector) series(name string) map[string]float64 {
+	s := c.values[name]
+	if s == nil {
+		s = map[string]float64{}
+		c.values[name] = s
 	}
+	return s
 }
 
-// SetRepoQueuedJobs updates the queued job count for a specific repo.
-func (c *Collector) SetRepoQueuedJobs(fullName string, count int64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.repoJobs[fullName] = count
-}
-
-// GetRepoQueuedJobs returns the queued job count for a specific repo.
-func (c *Collector) GetRepoQueuedJobs(fullName string) int64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.repoJobs[fullName]
-}
-
-// Handler returns an HTTP handler that serves metrics in Prometheus exposition format.
+// Handler serves the Prometheus text exposition format.
 func (c *Collector) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-
-		writeGauge(w, "scalerunner_active_runners", "Number of currently running runner containers", c.ActiveRunners.Load())
-		writeGauge(w, "scalerunner_queued_jobs", "Number of queued jobs across all repos", c.QueuedJobs.Load())
-		writeCounter(w, "scalerunner_total_launched", "Total number of runners launched", c.TotalLaunched.Load())
-		writeCounter(w, "scalerunner_total_completed", "Total number of runners completed successfully", c.TotalCompleted.Load())
-		writeCounter(w, "scalerunner_total_failed", "Total number of runners that failed", c.TotalFailed.Load())
-		writeGauge(w, "scalerunner_used_gpus", "Number of GPUs currently in use", c.UsedGPUs.Load())
-		writeGauge(w, "scalerunner_available_gpus", "Number of GPUs available", c.AvailableGPUs.Load())
-		writeCounter(w, "scalerunner_poll_errors_total", "Total GitHub API poll errors", c.PollErrors.Load())
-		writeCounter(w, "scalerunner_launch_errors_total", "Total runner launch errors", c.LaunchErrors.Load())
-		writeCounter(w, "scalerunner_token_errors_total", "Total registration token errors", c.TokenErrors.Load())
-
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		c.mu.Lock()
-		for repo, count := range c.repoJobs {
-			writeGaugeLabeled(w, "scalerunner_repo_queued_jobs", "Queued jobs per repo", "repo", repo, count)
+		defer c.mu.Unlock()
+		names := make([]string, 0, len(c.values))
+		for n := range c.values {
+			names = append(names, n)
 		}
-		c.mu.Unlock()
+		sort.Strings(names)
+		for _, n := range names {
+			typ := "gauge"
+			if strings.HasSuffix(n, "_total") {
+				typ = "counter"
+			}
+			fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", n, help[n], n, typ)
+			sets := make([]string, 0, len(c.values[n]))
+			for s := range c.values[n] {
+				sets = append(sets, s)
+			}
+			sort.Strings(sets)
+			for _, s := range sets {
+				if s == "" {
+					fmt.Fprintf(w, "%s %g\n", n, c.values[n][s])
+				} else {
+					fmt.Fprintf(w, "%s{scale_set=%q} %g\n", n, s, c.values[n][s])
+				}
+			}
+		}
 	})
-}
-
-func writeGauge(w http.ResponseWriter, name, help string, value int64) {
-	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %d\n", name, help, name, name, value)
-}
-
-func writeCounter(w http.ResponseWriter, name, help string, value int64) {
-	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n%s %d\n", name, help, name, name, value)
-}
-
-func writeGaugeLabeled(w http.ResponseWriter, name, help, labelKey, labelVal string, value int64) {
-	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s{%s=%q} %d\n",
-		name, help, name, name, labelKey, labelVal, value)
 }

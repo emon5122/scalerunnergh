@@ -1,16 +1,16 @@
-// scalerunnergh is a fully ephemeral, GPU-aware, auto-scaling GitHub Actions
-// runner orchestrator. It polls GitHub for queued workflow jobs, launches
-// Docker-based ephemeral runner containers on demand, and cleans them up
-// after completion.
+// scalerunnergh serves GitHub Actions runner scale sets from one host: it
+// starts an ephemeral runner per job (a container, or a native process on
+// Linux and Windows), within a host-wide slot pool, and removes it afterwards.
 //
 // Usage:
 //
-//	scalerunnergh --config config.json
-//	scalerunnergh  # uses environment variables
+//	scalerunnergh --config /etc/scalerunnergh/config.json
+//	scalerunnergh --config config.json --check   # validate and exit
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -18,13 +18,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/emon5122/scalerunnergh/internal/app"
 	"github.com/emon5122/scalerunnergh/internal/config"
-	gh "github.com/emon5122/scalerunnergh/internal/github"
 	"github.com/emon5122/scalerunnergh/internal/metrics"
-	"github.com/emon5122/scalerunnergh/internal/orchestrator"
-	"github.com/emon5122/scalerunnergh/internal/resource"
-	"github.com/emon5122/scalerunnergh/internal/runner"
 )
 
 var (
@@ -43,29 +41,37 @@ func run() error {
 	var (
 		configFile  string
 		showVersion bool
+		check       bool
 	)
-	flag.StringVar(&configFile, "config", "", "Path to config JSON file (optional, can use env vars)")
+	flag.StringVar(&configFile, "config", "", "Path to the host config JSON file")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
+	flag.BoolVar(&check, "check", false, "Validate the config and exit")
 	flag.Parse()
 
 	if showVersion {
 		fmt.Printf("scalerunnergh %s (built %s)\n", version, buildTime)
 		return nil
 	}
-
-	// Load config
-	var cfg *config.Config
-	var err error
-	if configFile != "" {
-		cfg, err = config.LoadFile(configFile)
-	} else {
-		cfg, err = config.LoadFromEnv()
+	if configFile == "" {
+		return fmt.Errorf("--config is required")
 	}
+	cfg, err := config.LoadFile(configFile)
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return err
+	}
+	if check {
+		fmt.Printf("config ok: host %s, %d scale set(s), %d slot(s)\n", cfg.Host.Name, len(cfg.ScaleSets), cfg.Host.MaxRunners)
+		return nil
 	}
 
-	// Setup logger
+	// SIGINT/SIGTERM (and a Windows service stop) cancel ctx; the app then
+	// stops every runner before exiting.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	return runMaybeService(ctx, cancel, func(ctx context.Context) error { return serve(ctx, cfg) })
+}
+
+func serve(ctx context.Context, cfg *config.Config) error {
 	level := slog.LevelInfo
 	switch cfg.LogLevel {
 	case "debug":
@@ -76,63 +82,30 @@ func run() error {
 		level = slog.LevelError
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	logger.Info("starting scalerunnergh", "version", version, "host", cfg.Host.Name,
+		"scale_sets", len(cfg.ScaleSets), "max_runners", cfg.Host.MaxRunners, "max_heavy", cfg.Host.MaxHeavy)
 
-	logger.Info("starting scalerunnergh",
-		"version", version,
-		"repos", len(cfg.Repos),
-		"max_runners", cfg.Resources.MaxRunners,
-		"max_gpus", cfg.Resources.MaxGPUs,
-		"gpu_enabled", cfg.Docker.GPUEnabled,
-		"image", cfg.Docker.Image)
-
-	// Initialize components
-	ghClient := gh.NewClient(nil)
-	dockerClient := runner.NewCLIDockerClient()
-	launcher := runner.NewLauncher(dockerClient, logger)
-	resMgr := resource.NewManager(
-		cfg.Resources.MaxRunners,
-		cfg.Resources.MaxGPUs,
-		cfg.Resources.MaxCPUs,
-		cfg.Resources.MaxMemMB,
-	)
 	met := metrics.New()
+	a := app.New(cfg, version, logger, met)
 
-	// Start metrics server if enabled
 	if cfg.Metrics.Enabled {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", met.Handler())
 		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
 			fmt.Fprint(w, "ok")
 		})
 		mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-			snap := resMgr.Snapshot()
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"active_runners":%d,"max_runners":%d,"used_gpus":%d,"max_gpus":%d}`,
-				snap.ActiveRunners, snap.MaxRunners, snap.UsedGPUs, snap.MaxGPUs)
+			_ = json.NewEncoder(w).Encode(a.Status())
 		})
-
+		srv := &http.Server{Addr: cfg.Metrics.Address, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
-			logger.Info("starting metrics server", "address", cfg.Metrics.Address)
-			if err := http.ListenAndServe(cfg.Metrics.Address, mux); err != nil {
+			logger.Info("metrics server listening", "address", cfg.Metrics.Address)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				logger.Error("metrics server error", "error", err)
 			}
 		}()
+		defer srv.Close()
 	}
-
-	// Setup graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigCh
-		logger.Info("received signal, shutting down", "signal", sig)
-		cancel()
-	}()
-
-	// Create and run orchestrator
-	orch := orchestrator.New(cfg, ghClient, launcher, resMgr, met, logger)
-	return orch.Run(ctx)
+	return a.Run(ctx)
 }
