@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.0](https://github.com/emon5122/scalerunnergh/compare/v1.2.0...v1.3.0) (2026-11-12)
+
+
+### Features
+
+* **images:** rust flavor ships CI release tools and a no-root sudo shim ([35fa775](https://github.com/emon5122/scalerunnergh/commit/35fa7759132095e9cebde49502a004a8b5f1bd22))
+* **native:** native.run_as runs Windows jobs as NETWORK SERVICE with a restricted token ([aaf1e02](https://github.com/emon5122/scalerunnergh/commit/aaf1e025d174f244162ea662b8f12cc5088acf35))
+
+
+### Bug Fixes
+
+* normalise native.root before the run_as system-dir guard; sudo shim ignores -g ([b390f0e](https://github.com/emon5122/scalerunnergh/commit/b390f0e87eb9d945cbd7e437f62249cde4e31eae))
+* review findings on run_as and the sudo shim ([7ce30a8](https://github.com/emon5122/scalerunnergh/commit/7ce30a8b350a99b568151c3c542abeb4142486f1))
+
 ## [1.2.0](https://github.com/emon5122/scalerunnergh/compare/v1.1.0...v1.2.0) (2026-11-12)
 
 
