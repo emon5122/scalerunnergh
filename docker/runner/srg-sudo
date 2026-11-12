@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# srg-sudo: installed as /usr/local/bin/sudo in the rust runner image.
+# Jobs get NO root. Workflows written for GitHub-hosted runners call sudo for
+# two things, both handled here without any privilege:
+#   - `sudo apt-get|apt install [-y] [flags] pkgs...`: succeeds only when every
+#     package is already in the image (dpkg -s); otherwise it fails and names
+#     the missing ones, so the image gets them instead of the job.
+#   - `sudo apt-get update` (and other apt maintenance): nothing to do.
+# Anything else runs as the job user, unprivileged (e.g. cleanup steps such as
+# removing preinstalled SDKs do what an unprivileged user may do).
+set -uo pipefail
+args=("$@")
+# drop sudo's own options (-E, -H, -n, -u root ...)
+while [ "${#args[@]}" -gt 0 ]; do
+    case "${args[0]}" in
+        -u | -g) args=("${args[@]:2}") ;;
+        --) args=("${args[@]:1}"); break ;;
+        -*) args=("${args[@]:1}") ;;
+        *) break ;;
+    esac
+done
+[ "${#args[@]}" -gt 0 ] || exit 0
+# environment assignments (sudo VAR=x cmd)
+while [ "${#args[@]}" -gt 0 ] && [[ "${args[0]}" == *=* ]]; do
+    export "${args[0]}"
+    args=("${args[@]:1}")
+done
+[ "${#args[@]}" -gt 0 ] || exit 0
+cmd="${args[0]##*/}"
+if [ "$cmd" = apt-get ] || [ "$cmd" = apt ]; then
+    sub=""
+    pkgs=()
+    for a in "${args[@]:1}"; do
+        case "$a" in
+            -*) ;;
+            *) if [ -z "$sub" ]; then sub="$a"; else pkgs+=("${a%%=*}"); fi ;;
+        esac
+    done
+    case "$sub" in
+        update | upgrade | dist-upgrade | clean | autoclean | autoremove | remove | purge)
+            echo "srg-sudo: '$cmd $sub' skipped (no root in scalerunnergh jobs)"
+            exit 0
+            ;;
+        install)
+            missing=()
+            for p in "${pkgs[@]}"; do
+                case "$p" in
+                    awscli) command -v aws >/dev/null && continue ;; # AWS CLI v2, not a dpkg package
+                esac
+                dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
+            done
+            if [ "${#missing[@]}" -gt 0 ]; then
+                echo "srg-sudo: not in the runner image: ${missing[*]} (add them to scalerunnergh docker/runner/Dockerfile)" >&2
+                exit 100
+            fi
+            echo "srg-sudo: already installed: ${pkgs[*]}"
+            exit 0
+            ;;
+    esac
+fi
+if [ "$cmd" = gem ] && [ "${args[1]:-}" = install ]; then
+    missing=()
+    for a in "${args[@]:2}"; do
+        case "$a" in -* | [0-9]*) continue ;; esac # flags and version values
+        gem list -i "^${a}$" >/dev/null 2>&1 || missing+=("$a")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo "srg-sudo: gems not in the runner image: ${missing[*]}" >&2
+        exit 1
+    fi
+    echo "srg-sudo: gems already installed"
+    exit 0
+fi
+exec "${args[@]}"

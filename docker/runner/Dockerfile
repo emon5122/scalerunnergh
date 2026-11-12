@@ -147,9 +147,41 @@ RUN set -eux; \
     apt-get update; apt-get install -y --no-install-recommends \
         clang-${LLVM_VERSION} lld-${LLVM_VERSION} cmake libglib2.0-dev sqlite3 shellcheck lsb-release wget \
         libudev-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsoup-3.0-dev \
-        libjavascriptcoregtk-4.1-dev libssl-dev file; \
+        libjavascriptcoregtk-4.1-dev libssl-dev file \
+        imagemagick webp rpm ruby ruby-dev maven libpq-dev; \
     rm -rf /var/lib/apt/lists/*; \
     clang-${LLVM_VERSION} --version
+# Release-upload and packaging tools CI jobs used to install with sudo.
+# renovate: datasource=github-tags depName=aws/aws-cli
+ARG AWSCLI_VERSION=2.40.1
+ARG AWSCLI_SHA256_AMD64=fddb097a8ea197dc9beed9e4426ef99aded612a52df64581e079b6e8817e1d24
+# renovate: datasource=github-releases depName=AppImage/appimagetool
+ARG APPIMAGETOOL_VERSION=1.9.1
+ARG APPIMAGETOOL_SHA256_AMD64=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+# mc has no binary downloads any more: built from the tagged module (go.sum checked).
+# renovate: datasource=github-tags depName=minio/mc
+ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
+# renovate: datasource=rubygems depName=fpm
+ARG FPM_VERSION=1.18.0
+RUN set -eux; \
+    curl -fsSL -o /tmp/awscli.zip "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip"; \
+    echo "${AWSCLI_SHA256_AMD64}  /tmp/awscli.zip" | sha256sum -c -; \
+    unzip -q /tmp/awscli.zip -d /tmp/awscli; /tmp/awscli/aws/install; \
+    curl -fsSL -o /usr/local/bin/appimagetool "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"; \
+    echo "${APPIMAGETOOL_SHA256_AMD64}  /usr/local/bin/appimagetool" | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/appimagetool; \
+    GOPATH=/tmp/gopath GOCACHE=/tmp/gocache GOBIN=/usr/local/bin GOFLAGS=-trimpath GOTOOLCHAIN=local \
+        go install "github.com/minio/mc@${MC_VERSION}"; \
+    gem install --no-document fpm -v "${FPM_VERSION}"; \
+    chmod -R u+w /tmp/gopath; rm -rf /tmp/*; \
+    aws --version; mc --version; fpm --version; mvn -v | head -1
+# No root for jobs: sudo is a shim that only checks apt packages are present
+# and otherwise runs the command unprivileged (srg-sudo). /usr/local/bin is the
+# job user's, for workflows that drop a downloaded tool there.
+COPY srg-sudo /usr/local/bin/sudo
+RUN chmod 0755 /usr/local/bin/sudo && chown runner:runner /usr/local/bin
+# AppImages cannot mount FUSE inside a job container.
+ENV APPIMAGE_EXTRACT_AND_RUN=1
 USER runner
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
