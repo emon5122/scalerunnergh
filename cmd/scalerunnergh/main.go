@@ -118,5 +118,11 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		}()
 		defer srv.Close()
 	}
-	return a.Run(ctx)
+	if err := a.Run(ctx); err != nil {
+		// Also to the log: a service has no stderr.
+		logger.Error("scalerunnergh stopped with an error", "error", err)
+		return err
+	}
+	logger.Info("scalerunnergh stopped")
+	return nil
 }

@@ -352,8 +352,11 @@ func (s *service) session(ctx context.Context) error {
 	}
 	s.logger.Info("listening", "scale_set_id", id, "backend", s.ss.Backend)
 	err = l.Run(ctx, s.scaler)
-	if errors.Is(err, context.Canceled) {
-		return nil
+	if ctx.Err() != nil {
+		return nil // shutting down
+	}
+	if err == nil {
+		err = errors.New("listener returned without an error")
 	}
 	return err
 }

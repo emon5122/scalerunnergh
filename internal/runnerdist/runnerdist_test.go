@@ -103,6 +103,7 @@ func TestEnsureRejectsEscapes(t *testing.T) {
 		"link escapes":   {{name: "bin/l", body: "../../outside", link: true}},
 		"chained links":  {{name: "d/l", body: "..", link: true}, {name: "d/x", body: "l/..", link: true}, {name: "d/x/evil", body: "x"}},
 		"write via link": {{name: "l", body: "bin", link: true}, {name: "l", body: "overwrite"}},
+		"link via link":  {{name: "top/keep", body: "x"}, {name: "a/b/c", body: "../../top", link: true}, {name: "a/b/c/l", body: "../../../victim", link: true}},
 	} {
 		b := tgz(t, entries)
 		url, _ := serve(t, b)
@@ -113,6 +114,18 @@ func TestEnsureRejectsEscapes(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, "dist", "evil")); err == nil {
 			t.Errorf("%s: file written outside the target", name)
 		}
+	}
+}
+
+func TestEnsureAcceptsLinkToLink(t *testing.T) {
+	b := tgz(t, []entry{{name: "bin/real", body: "x"}, {name: "bin/a", body: "real", link: true}, {name: "bin/b", body: "a", link: true}})
+	url, _ := serve(t, b)
+	dir, err := Ensure(context.Background(), t.TempDir(), "1", sum(b), url)
+	if err != nil {
+		t.Fatalf("a symlink to an unpacked symlink is legitimate: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "bin", "b")); err != nil || string(got) != "x" {
+		t.Fatalf("link chain broken: %q %v", got, err)
 	}
 }
 

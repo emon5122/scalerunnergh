@@ -24,7 +24,7 @@ func (f *fakeAPI) GetRepo(_ context.Context, owner, repo string) (*ghapi.Repo, e
 	}
 	r, ok := f.repos[owner+"/"+repo]
 	if !ok {
-		return nil, errors.New("status 404")
+		return nil, &ghapi.StatusError{Path: "/repos/" + owner + "/" + repo, Status: 404}
 	}
 	return r, nil
 }
@@ -35,7 +35,7 @@ func (f *fakeAPI) GetRun(_ context.Context, _, _ string, id int64) (*ghapi.Run, 
 	}
 	r, ok := f.runs[id]
 	if !ok {
-		return nil, errors.New("status 404")
+		return nil, &ghapi.StatusError{Path: "/runs", Status: 404}
 	}
 	return r, nil
 }
@@ -76,9 +76,9 @@ func TestAllowJob(t *testing.T) {
 		{"run without head repo", "app", 3, false, false, "fork"},
 		{"run of another repo", "inner", 1, false, false, "fork"},
 		{"public repo", "public", 1, false, false, "public repository"},
-		{"run unknown", "app", 99, false, true, "cannot verify workflow run"},
+		{"run gone (404) is a refusal, not a retry", "app", 99, false, false, "workflow run not found"},
 		{"no run id", "app", 0, false, false, "no workflow run id"},
-		{"unknown repo", "ghost", 1, false, true, "cannot verify repository"},
+		{"repo gone (404) is a refusal, not a retry", "ghost", 1, false, false, "repository not found"},
 		{"no repo", "", 1, false, false, "no repository"},
 	}
 	for _, c := range cases {

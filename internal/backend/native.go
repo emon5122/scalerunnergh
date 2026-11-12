@@ -165,7 +165,7 @@ func (n *Native) Stop(ctx context.Context, h Handle) error {
 			}
 		}
 		// Children that outlived the runner, then release the handle.
-		p.tree.kill(true)
+		p.tree.killOrphans()
 		p.tree.close()
 	}
 	if !n.ownsDir(h.ID) {

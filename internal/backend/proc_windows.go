@@ -29,6 +29,10 @@ func setProcAttrs(cmd *exec.Cmd, nice int) {
 }
 
 // procTree is a Job Object holding the runner and everything it starts.
+//
+// Known limit, to verify on a real host: the runner is assigned to the job
+// right after it starts, not created suspended, so a child that cmd.exe
+// spawns within those first microseconds would be outside the job.
 // The job is set to kill its processes when the last handle closes, so the
 // tree also dies if the orchestrator itself crashes: no pid is ever killed
 // by number later, which rules out hitting an unrelated process.
@@ -72,6 +76,14 @@ func (t procTree) kill(force bool) {
 		return
 	}
 	_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(t.pid)).Run()
+}
+
+// killOrphans ends what is left of the tree after the runner exited. Without
+// a job nothing is done: the runner's pid may already belong to someone else.
+func (t procTree) killOrphans() {
+	if t.job != 0 {
+		_ = windows.TerminateJobObject(t.job, 1)
+	}
 }
 
 func (t procTree) close() {

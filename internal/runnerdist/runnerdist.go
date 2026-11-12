@@ -173,6 +173,30 @@ func safeJoin(dest, name string) (string, error) {
 	return p, nil
 }
 
+// safeLink checks a symlink entry at p (already vetted by safeJoin): its
+// target, resolved from the real location of its parent directory, must stay
+// inside dest.
+func safeLink(dest, p, name, linkname string) error {
+	if filepath.IsAbs(linkname) || strings.HasPrefix(linkname, "/") || strings.HasPrefix(linkname, `\`) {
+		return fmt.Errorf("archive symlink %q is absolute", name)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	realDest, err := filepath.EvalSymlinks(dest)
+	if err != nil {
+		return err
+	}
+	realParent, err := filepath.EvalSymlinks(filepath.Dir(p))
+	if err != nil {
+		return err
+	}
+	if !within(realDest, realParent) || !within(realDest, filepath.Join(realParent, filepath.FromSlash(linkname))) {
+		return fmt.Errorf("archive symlink %q points outside the target dir", name)
+	}
+	return nil
+}
+
 func within(dir, p string) bool {
 	rel, err := filepath.Rel(dir, p)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
@@ -211,13 +235,7 @@ func untarGz(archive, dest string) error {
 				return err
 			}
 		case tar.TypeSymlink:
-			if filepath.IsAbs(hdr.Linkname) {
-				return fmt.Errorf("archive symlink %q is absolute", hdr.Name)
-			}
-			if _, err := safeJoin(dest, filepath.Join(filepath.Dir(hdr.Name), hdr.Linkname)); err != nil {
-				return err
-			}
-			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			if err := safeLink(dest, p, hdr.Name, hdr.Linkname); err != nil {
 				return err
 			}
 			if err := os.Symlink(hdr.Linkname, p); err != nil {

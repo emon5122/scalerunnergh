@@ -97,6 +97,10 @@ func (g *Guard) AllowJob(ctx context.Context, owner, repo string, runID int64) (
 		return false, "repository not in allow_repos", nil
 	}
 	private, err := g.repoPrivate(ctx, owner, repo)
+	if ghapi.IsNotFound(err) {
+		// Gone, or not visible to this credential: a definite no, not a retry.
+		return false, "repository not found", nil
+	}
 	if err != nil {
 		return false, "cannot verify repository", fmt.Errorf("guard: %w", err)
 	}
@@ -104,6 +108,9 @@ func (g *Guard) AllowJob(ctx context.Context, owner, repo string, runID int64) (
 		return false, "public repository", nil
 	}
 	run, err := g.api.GetRun(ctx, owner, repo, runID)
+	if ghapi.IsNotFound(err) {
+		return false, "workflow run not found", nil
+	}
 	if err != nil {
 		return false, "cannot verify workflow run", fmt.Errorf("guard: %w", err)
 	}

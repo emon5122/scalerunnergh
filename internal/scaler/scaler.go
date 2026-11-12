@@ -83,7 +83,8 @@ type Scaler struct {
 	surplusSince time.Time
 	closed       bool
 	draining     bool
-	cooldown     time.Time // no starts before this (a runner died right after start)
+	cooldown     time.Time // no starts before this (failed start, or a runner died at start)
+	startFails   int       // consecutive failed starts, for the backoff
 	wg           sync.WaitGroup
 }
 
@@ -92,6 +93,9 @@ type Scaler struct {
 var (
 	quickExit     = 15 * time.Second
 	startCooldown = 30 * time.Second
+	// A failed start pauses starts for startBackoff, doubling up to maxStartBackoff.
+	startBackoff    = 5 * time.Second
+	maxStartBackoff = 2 * time.Minute
 )
 
 // New creates a scaler.
@@ -121,20 +125,73 @@ func (s *Scaler) SetScaleSetID(id int) {
 	s.mu.Unlock()
 }
 
+// guardRetries and guardRetryPause bound the in-process retries of a guard
+// check that could not reach GitHub.
+var (
+	guardRetries    = 3
+	guardRetryPause = 2 * time.Second
+)
+
+// allowJob asks the guard, retrying a few times while GitHub cannot be asked.
+func (s *Scaler) allowJob(ctx context.Context, owner, repo string, runID int64) (bool, string, error) {
+	var (
+		ok     bool
+		reason string
+		err    error
+	)
+	for attempt := 0; attempt < guardRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return false, reason, ctx.Err()
+			case <-time.After(guardRetryPause):
+			}
+		}
+		if ok, reason, err = s.o.Guard.AllowJob(ctx, owner, repo, runID); err == nil {
+			return ok, reason, nil
+		}
+	}
+	return false, reason, err
+}
+
 // Scale handles one message from GitHub (listener.Scaler).
+//
+// Everything in the message is processed even if a guard check cannot be
+// completed: started jobs and statistics first, then the available jobs that
+// passed the guard are acquired. Only then is an unverifiable job reported as
+// an error, which restarts the message session so the job is offered again.
 func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
 	if msg == nil {
 		s.Reconcile(ctx)
 		return nil
 	}
+	for _, j := range msg.JobStartedMessages {
+		s.jobStarted(ctx, j)
+	}
+	for _, j := range msg.JobCompletedMessages {
+		s.o.Logger.Info("job completed", "runner", j.RunnerName, "result", j.Result,
+			"repo", j.OwnerName+"/"+j.RepositoryName, "job", j.JobDisplayName)
+	}
+	if msg.Statistics != nil {
+		s.mu.Lock()
+		s.assigned = msg.Statistics.TotalAssignedJobs
+		s.mu.Unlock()
+		s.o.Metrics.Set(metrics.JobsAssigned, s.o.ScaleSet.Name, float64(msg.Statistics.TotalAssignedJobs))
+	}
+
+	var deferred error
 	if len(msg.JobAvailableMessages) > 0 {
 		ids := make([]int64, 0, len(msg.JobAvailableMessages))
 		for _, j := range msg.JobAvailableMessages {
-			ok, reason, err := s.o.Guard.AllowJob(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
+			ok, reason, err := s.allowJob(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
 			if err != nil {
-				// Not verifiable right now: do not acquire, and fail the message
-				// so it is not acknowledged and comes again after a reconnect.
-				return fmt.Errorf("guard check for %s/%s run %d: %w", j.OwnerName, j.RepositoryName, j.WorkflowRunID, err)
+				// Not verifiable right now: never acquired.
+				s.o.Logger.Error("job could not be verified, not acquired", "error", err,
+					"repo", j.OwnerName+"/"+j.RepositoryName, "run_id", j.WorkflowRunID)
+				if deferred == nil {
+					deferred = fmt.Errorf("guard check for %s/%s run %d: %w", j.OwnerName, j.RepositoryName, j.WorkflowRunID, err)
+				}
+				continue
 			}
 			if !ok {
 				s.o.Metrics.Add(metrics.JobsRefused, s.o.ScaleSet.Name, 1)
@@ -152,25 +209,13 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		s.mu.Unlock()
 		if len(ids) > 0 && acq != nil {
 			if _, err := acq.AcquireJobs(ctx, ids); err != nil {
+				s.Reconcile(ctx)
 				return fmt.Errorf("acquire jobs: %w", err)
 			}
 		}
 	}
-	for _, j := range msg.JobStartedMessages {
-		s.jobStarted(ctx, j)
-	}
-	for _, j := range msg.JobCompletedMessages {
-		s.o.Logger.Info("job completed", "runner", j.RunnerName, "result", j.Result,
-			"repo", j.OwnerName+"/"+j.RepositoryName, "job", j.JobDisplayName)
-	}
-	if msg.Statistics != nil {
-		s.mu.Lock()
-		s.assigned = msg.Statistics.TotalAssignedJobs
-		s.mu.Unlock()
-		s.o.Metrics.Set(metrics.JobsAssigned, s.o.ScaleSet.Name, float64(msg.Statistics.TotalAssignedJobs))
-	}
 	s.Reconcile(ctx)
-	return nil
+	return deferred
 }
 
 // jobStarted marks the runner busy and re-checks the job: a job the guard
@@ -188,9 +233,9 @@ func (s *Scaler) jobStarted(ctx context.Context, j *scaleset.JobStarted) {
 	if r == nil {
 		return
 	}
-	ok, reason, err := s.o.Guard.AllowJob(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
+	ok, reason, err := s.allowJob(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
 	if err != nil {
-		ok, reason = false, "cannot verify the running job: "+err.Error() // fail closed
+		ok, reason = false, "cannot verify the running job: "+err.Error() // fail closed, after retries
 	}
 	if !ok {
 		s.o.Metrics.Add(metrics.JobsRefused, s.o.ScaleSet.Name, 1)
@@ -206,9 +251,9 @@ func (s *Scaler) Reconcile(ctx context.Context) {
 	ss := s.o.ScaleSet
 	for {
 		s.mu.Lock()
-		if s.closed || s.draining {
+		if s.closed || s.draining || s.o.ScaleSetID == 0 {
 			s.mu.Unlock()
-			return
+			return // shutting down, or not registered at GitHub yet
 		}
 		count := len(s.runners) + s.starting
 		desired := min(ss.MaxRunners, ss.MinRunners+s.assigned)
@@ -253,6 +298,11 @@ func (s *Scaler) startOne(ctx context.Context, slot *pool.Slot) bool {
 	if err != nil {
 		s.mu.Lock()
 		s.starting--
+		// Back off before the next start: releasing the slot wakes every
+		// reconciler, and a failing backend or API must not be hammered.
+		pause := min(startBackoff<<min(s.startFails, 10), maxStartBackoff)
+		s.startFails++
+		s.cooldown = time.Now().Add(pause)
 		s.mu.Unlock()
 		slot.Release()
 		s.o.Metrics.Add(metrics.StartErrors, ss.Name, 1)
@@ -270,6 +320,7 @@ func (s *Scaler) startOne(ctx context.Context, slot *pool.Slot) bool {
 		return false
 	}
 	s.starting--
+	s.startFails = 0
 	s.runners[r.name] = r
 	s.wg.Add(1)
 	go s.watch(r)
@@ -283,9 +334,6 @@ func (s *Scaler) start(ctx context.Context, slot *pool.Slot) (*runnerState, erro
 	s.mu.Lock()
 	scaleSetID := s.o.ScaleSetID
 	s.mu.Unlock()
-	if scaleSetID == 0 {
-		return nil, fmt.Errorf("scale set not registered yet")
-	}
 	jit, err := s.o.JIT.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: name}, scaleSetID)
 	if err != nil {
 		return nil, fmt.Errorf("jit config: %w", err)
@@ -351,7 +399,7 @@ func (s *Scaler) watch(r *runnerState) {
 	delete(s.runners, r.name)
 	forced := r.stopping || timedOut
 	wasBusy := r.busy
-	if !wasBusy && !forced && time.Since(r.started) < quickExit {
+	if !wasBusy && !forced && (code != 0 || err != nil) && time.Since(r.started) < quickExit {
 		// Died right after start without taking a job (bad image, rejected
 		// runner version): do not spin, pause before the next start.
 		s.cooldown = time.Now().Add(startCooldown)

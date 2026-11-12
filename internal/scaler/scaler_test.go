@@ -145,6 +145,23 @@ func (g fakeGuard) AllowJob(_ context.Context, owner, repo string, _ int64) (boo
 	return true, "", nil
 }
 
+// flakyGuard cannot verify for the first `failures` calls, then allows.
+type flakyGuard struct {
+	mu       sync.Mutex
+	failures int
+	calls    int
+}
+
+func (g *flakyGuard) AllowJob(context.Context, string, string, int64) (bool, string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.calls++
+	if g.calls <= g.failures {
+		return false, "cannot verify", errors.New("github down")
+	}
+	return true, "", nil
+}
+
 type fakeAcquirer struct{ got [][]int64 }
 
 func (a *fakeAcquirer) AcquireJobs(_ context.Context, ids []int64) ([]int64, error) {
@@ -189,6 +206,17 @@ func (r *rig) lastCap() int {
 
 func stats(n int) *scaleset.RunnerScaleSetMessage {
 	return &scaleset.RunnerScaleSetMessage{Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: n}}
+}
+
+func TestMain(m *testing.M) {
+	guardRetryPause = time.Millisecond
+	m.Run()
+}
+
+func (r *rig) clearCooldown() {
+	r.s.mu.Lock()
+	r.s.cooldown = time.Time{}
+	r.s.mu.Unlock()
 }
 
 func eventually(t *testing.T, what string, cond func() bool) {
@@ -354,7 +382,7 @@ func TestIdleSurplusRunnersAreRemovedAndUnregistered(t *testing.T) {
 	r.s.Close(ctx)
 }
 
-func TestStartErrorsReleaseSlots(t *testing.T) {
+func TestStartErrorsReleaseSlotsAndBackOff(t *testing.T) {
 	p := pool.New(2, 0, nil)
 	r := newRig(p, config.ScaleSetConfig{MaxRunners: 2}, nil)
 	ctx := context.Background()
@@ -363,9 +391,17 @@ func TestStartErrorsReleaseSlots(t *testing.T) {
 	if u, _ := p.Used(); u != 0 || alive(r.s) != 0 {
 		t.Fatalf("slot leaked on JIT error: used=%d", u)
 	}
+	// The released slot wakes reconcilers; they must not retry at once.
 	r.jit.err = nil
+	for i := 0; i < 50; i++ {
+		r.s.Reconcile(ctx)
+	}
+	if alive(r.s) != 0 || r.m.Get(metrics.StartErrors, "set") != 1 {
+		t.Fatalf("starts must pause after a failure: alive=%d errors=%v", alive(r.s), r.m.Get(metrics.StartErrors, "set"))
+	}
+	r.clearCooldown()
 	r.b.startErr = errors.New("docker down")
-	r.s.Scale(ctx, stats(2))
+	r.s.Reconcile(ctx)
 	if u, _ := p.Used(); u != 0 {
 		t.Fatalf("slot leaked on backend error: used=%d", u)
 	}
@@ -375,7 +411,14 @@ func TestStartErrorsReleaseSlots(t *testing.T) {
 	if r.m.Get(metrics.StartErrors, "set") != 2 {
 		t.Fatal("start errors not counted")
 	}
+	r.s.mu.Lock()
+	pause := time.Until(r.s.cooldown)
+	r.s.mu.Unlock()
+	if pause < 6*time.Second {
+		t.Fatalf("second failure must back off longer, got %v", pause)
+	}
 	r.b.startErr = nil
+	r.clearCooldown()
 	r.s.Reconcile(ctx)
 	if alive(r.s) != 2 {
 		t.Fatalf("should recover, have %d", alive(r.s))
@@ -402,17 +445,57 @@ func TestMaxJobDurationCountsFromJobStart(t *testing.T) {
 	r.s.Close(ctx)
 }
 
-func TestUnverifiableJobFailsTheMessage(t *testing.T) {
-	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, fakeGuard{err: map[string]error{"app": errors.New("github down")}})
-	err := r.s.Scale(context.Background(), &scaleset.RunnerScaleSetMessage{JobAvailableMessages: []*scaleset.JobAvailable{
-		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 1, OwnerName: "o", RepositoryName: "app"}},
-	}})
+func TestUnverifiableJobFailsTheMessageAfterHandlingTheRest(t *testing.T) {
+	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, fakeGuard{err: map[string]error{"flaky": errors.New("github down")}})
+	ctx := context.Background()
+	r.s.Scale(ctx, stats(1))
+	running := r.b.names()[0]
+	err := r.s.Scale(ctx, &scaleset.RunnerScaleSetMessage{
+		JobAvailableMessages: []*scaleset.JobAvailable{
+			{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 1, OwnerName: "o", RepositoryName: "flaky"}},
+			{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 2, OwnerName: "o", RepositoryName: "app"}},
+		},
+		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: running, JobMessageBase: scaleset.JobMessageBase{OwnerName: "o", RepositoryName: "app"}}},
+		Statistics:         &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 2},
+	})
 	if err == nil {
-		t.Fatal("a job that cannot be verified must fail the message, so it is delivered again")
+		t.Fatal("a job that cannot be verified must fail the message, so it is offered again")
 	}
-	if len(r.acq.got) != 0 {
-		t.Fatalf("nothing may be acquired: %v", r.acq.got)
+	if len(r.acq.got) != 1 || fmt.Sprint(r.acq.got[0]) != "[2]" {
+		t.Fatalf("the verified job must still be acquired, the other never: %v", r.acq.got)
 	}
+	if _, busy := r.s.Count(); busy != 1 {
+		t.Fatal("the started job in the same message must be marked busy")
+	}
+	if alive(r.s) != 2 {
+		t.Fatalf("statistics in the same message must be applied: %d runners", alive(r.s))
+	}
+	r.s.Close(ctx)
+}
+
+func TestGuardCheckIsRetriedBeforeGivingUp(t *testing.T) {
+	g := &flakyGuard{failures: 2}
+	r := newRig(pool.New(1, 0, nil), config.ScaleSetConfig{MaxRunners: 1}, g)
+	err := r.s.Scale(context.Background(), &scaleset.RunnerScaleSetMessage{JobAvailableMessages: []*scaleset.JobAvailable{
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 7, OwnerName: "o", RepositoryName: "app"}},
+	}})
+	if err != nil || len(r.acq.got) != 1 || g.calls != 3 {
+		t.Fatalf("a transient guard error must be retried: err=%v acquired=%v calls=%d", err, r.acq.got, g.calls)
+	}
+}
+
+func TestFastJobDoesNotPauseStarts(t *testing.T) {
+	r := newRig(pool.New(1, 0, nil), config.ScaleSetConfig{MaxRunners: 1}, nil)
+	ctx := context.Background()
+	r.s.Scale(ctx, stats(1))
+	first := r.b.names()[0]
+	r.b.finish(first, 0) // job done before its started message arrived; another job is waiting
+	eventually(t, "completion counted", func() bool { return r.m.Get(metrics.RunnersCompleted, "set") == 1 })
+	eventually(t, "the next job gets a runner at once", func() bool {
+		n := r.b.names()
+		return len(n) == 1 && n[0] != first
+	})
+	r.s.Close(ctx)
 }
 
 func TestRunningJobThatCannotBeVerifiedIsStopped(t *testing.T) {
@@ -460,9 +543,7 @@ func TestRunnerDyingAtStartPausesStarts(t *testing.T) {
 	if alive(r.s) != 0 || len(r.b.started) != 1 {
 		t.Fatalf("must not restart at once: alive=%d starts=%d", alive(r.s), len(r.b.started))
 	}
-	r.s.mu.Lock()
-	r.s.cooldown = time.Time{}
-	r.s.mu.Unlock()
+	r.clearCooldown()
 	r.s.Reconcile(ctx)
 	if alive(r.s) != 1 {
 		t.Fatal("must start again after the pause")

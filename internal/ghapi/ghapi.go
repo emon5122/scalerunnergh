@@ -6,6 +6,7 @@ package ghapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -94,6 +95,23 @@ func (a *AppToken) Token(ctx context.Context) (string, error) {
 	return a.token, nil
 }
 
+// StatusError is a non-200 answer from the REST API.
+type StatusError struct {
+	Path   string
+	Status int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("github GET %s: status %d", e.Path, e.Status)
+}
+
+// IsNotFound reports whether err says the resource does not exist (404/410):
+// a definite answer, unlike a network error or a rate limit.
+func IsNotFound(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && (se.Status == http.StatusNotFound || se.Status == http.StatusGone)
+}
+
 // Client calls the REST API.
 type Client struct {
 	BaseURL string // default https://api.github.com
@@ -179,7 +197,7 @@ func (c *Client) get(ctx context.Context, path string, dest any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		return fmt.Errorf("github GET %s: status %d", path, resp.StatusCode)
+		return &StatusError{Path: path, Status: resp.StatusCode}
 	}
 	return json.NewDecoder(resp.Body).Decode(dest)
 }

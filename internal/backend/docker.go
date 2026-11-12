@@ -166,8 +166,10 @@ func (d *Docker) Wait(ctx context.Context, h Handle) (int, error) {
 		if ctx.Err() != nil {
 			return -1, ctx.Err()
 		}
+		// Give up only on a definite answer: the container stopped or is gone.
+		// While the daemon cannot be asked (restart), keep waiting.
 		running, ierr := d.run(ctx, nil, "inspect", "-f", "{{.State.Running}}", h.ID)
-		if ierr != nil || running != "true" {
+		if (ierr == nil && running != "true") || (ierr != nil && isNoSuchObject(ierr)) {
 			return -1, err
 		}
 		select {
@@ -178,10 +180,15 @@ func (d *Docker) Wait(ctx context.Context, h Handle) (int, error) {
 	}
 }
 
+func isNoSuchObject(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such container") || strings.Contains(msg, "no such object")
+}
+
 // Stop implements Backend: remove the container and its anonymous volumes.
 func (d *Docker) Stop(ctx context.Context, h Handle) error {
 	_, err := d.run(ctx, nil, "rm", "-f", "-v", h.ID)
-	if err != nil && strings.Contains(err.Error(), "No such container") {
+	if err != nil && isNoSuchObject(err) {
 		return nil
 	}
 	return err

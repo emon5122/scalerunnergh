@@ -165,8 +165,9 @@ One JSON file per host. Unknown fields are errors. Validate with
   read whatever that account can, including the credential file and the unpacked runner
   release. Use native mode only for repos you fully trust, under a dedicated unprivileged
   account, with a credential scoped to that one org.
-- **`pull_request_target`** runs the base repository's workflow, so the guard treats it as
-  a run of the repository itself. Do not check out and run fork code in such workflows.
+- **`pull_request_target`, `workflow_run`, `issue_comment`** run the base repository's
+  workflow, so the guard treats them as runs of the repository itself. Do not check out and
+  run fork code in such workflows.
 - **Known limit**: a runner is known to be busy from GitHub's job-started message. If that
   message is delayed past `idle_timeout` (or the 20 s settle time of a drain), a runner
   that just took a job can be stopped; GitHub then fails that job.

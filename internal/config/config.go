@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -255,6 +256,10 @@ func (c *Config) Validate() error {
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
+	if c.LogFile != "" && !filepath.IsAbs(c.LogFile) && !windowsAbs(c.LogFile) {
+		// A service's working directory is not where anyone looks for logs.
+		return errors.New("config: log_file must be an absolute path")
+	}
 	if len(c.ScaleSets) == 0 {
 		return errors.New("config: at least one scale set is required")
 	}
@@ -322,6 +327,12 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// windowsAbs reports a drive-letter path (C:\...), so Windows configs also
+// validate on other systems.
+func windowsAbs(p string) bool {
+	return len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')
 }
 
 // EffectiveAuth returns the auth for a scale set (its own, else the host default).

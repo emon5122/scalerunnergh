@@ -152,7 +152,31 @@ func TestDockerWaitSurvivesTransientErrors(t *testing.T) {
 		return "", errors.New("docker wait: boom")
 	}
 	if _, err := d.Wait(context.Background(), Handle{ID: "c"}); err == nil {
-		t.Fatal("wait must fail once the container is gone or stopped")
+		t.Fatal("wait must fail once the container stopped")
+	}
+	// Daemon down: wait and inspect both fail; keep waiting, then it comes back.
+	calls := 0
+	d.run = func(_ context.Context, _ []byte, args ...string) (string, error) {
+		calls++
+		if calls <= 6 {
+			return "", errors.New("Cannot connect to the Docker daemon")
+		}
+		if args[0] == "wait" {
+			return "0", nil
+		}
+		return "true", nil
+	}
+	if code, err := d.Wait(context.Background(), Handle{ID: "c"}); err != nil || code != 0 {
+		t.Fatalf("wait must outlast a daemon restart: code=%d err=%v", code, err)
+	}
+	d.run = func(_ context.Context, _ []byte, args ...string) (string, error) {
+		if args[0] == "inspect" {
+			return "", errors.New("Error: No such object: c")
+		}
+		return "", errors.New("docker wait: No such container: c")
+	}
+	if _, err := d.Wait(context.Background(), Handle{ID: "c"}); err == nil {
+		t.Fatal("wait must fail once the container is gone")
 	}
 }
 

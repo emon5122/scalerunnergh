@@ -41,6 +41,9 @@ func (t procTree) kill(force bool) {
 	_ = syscall.Kill(-t.pgid, sig)
 }
 
+// killOrphans kills what is left of the group after the runner exited.
+func (t procTree) killOrphans() { t.kill(true) }
+
 func (t procTree) close() {}
 
 // killLeftover kills the process group of a runner left by an earlier
