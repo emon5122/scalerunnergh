@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/emon5122/scalerunnergh/compare/v1.1.0...v1.2.0) (2026-11-12)
+
+
+### Features
+
+* **native:** native.env sets extra runner environment (toolchain paths, runner hooks) ([291ba70](https://github.com/emon5122/scalerunnergh/commit/291ba70fa9cce2a770fc72e18aeb55d7e54b05bf))
+
+
+### Bug Fixes
+
+* **scaler:** next job of a workflow waited ~5 min for a runner ([8b4765b](https://github.com/emon5122/scalerunnergh/commit/8b4765b65403affe3854345b2f99ad09963933c3))
+
 ## [1.1.0](https://github.com/emon5122/scalerunnergh/compare/v1.0.0...v1.1.0) (2026-11-12)
 
 
