@@ -47,6 +47,10 @@ for f in examples/*.json; do
     esac
 done
 
+step "deploy files"
+for f in deploy/github-app/*.json; do jq empty "$f"; done
+bash -n deploy/github-app/convert.sh
+
 if [ "${SKIP_DOCKER:-}" = "1" ]; then
     echo; echo "SKIP_DOCKER=1: integration and image lanes skipped"; exit 0
 fi

@@ -123,6 +123,9 @@ One JSON file per host. Unknown fields are errors. Validate with
 - **GitHub App** (recommended): organization permission *Self-hosted runners: read and
   write*, repository permissions *Metadata: read* and *Actions: read*. An App installation
   belongs to one org, so set `auth` per scale set when a host serves several orgs.
+  On a user account (personal repos: repo-level scale sets, `runner_group: "default"`)
+  the App needs repository permission *Administration: read and write* instead.
+  Manifests and a create script: [`deploy/github-app`](deploy/github-app/README.md).
 
 ### `scale_sets[]`
 

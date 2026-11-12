@@ -1,0 +1,12 @@
+{
+  "name": "scalerunnergh-ORG",
+  "url": "https://github.com/emon5122/scalerunnergh",
+  "redirect_url": "https://github.com/emon5122/scalerunnergh",
+  "public": false,
+  "default_permissions": {
+    "organization_self_hosted_runners": "write",
+    "actions": "read",
+    "metadata": "read"
+  },
+  "default_events": []
+}

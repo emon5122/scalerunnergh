@@ -1,0 +1,12 @@
+{
+  "name": "scalerunnergh-USER",
+  "url": "https://github.com/emon5122/scalerunnergh",
+  "redirect_url": "https://github.com/emon5122/scalerunnergh",
+  "public": false,
+  "default_permissions": {
+    "administration": "write",
+    "actions": "read",
+    "metadata": "read"
+  },
+  "default_events": []
+}
