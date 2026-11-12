@@ -1,18 +1,25 @@
-# Dockerfile for the scalerunnergh orchestrator.
-# Multi-stage build: compiles the Go binary, then copies into a minimal image.
-FROM golang:1.23-alpine AS builder
+# Orchestrator image. The docker CLI is included because the docker backend
+# drives the host daemon through the mounted socket; job containers never get it.
+FROM golang:1.27-alpine AS builder
 
-WORKDIR /app
-COPY go.mod go.sum* ./
-RUN go mod download || true
-COPY . .
+ARG VERSION=dev
+ARG BUILD_TIME=unknown
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /scalerunnergh ./cmd/scalerunnergh
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}" \
+    -o /scalerunnergh ./cmd/scalerunnergh
 
-FROM alpine:3.19
+FROM alpine:3.22
 
-RUN apk --no-cache add ca-certificates docker-cli
+RUN apk --no-cache add ca-certificates docker-cli tini
 
 COPY --from=builder /scalerunnergh /usr/local/bin/scalerunnergh
 
-ENTRYPOINT ["scalerunnergh"]
+EXPOSE 9090
+ENTRYPOINT ["tini", "--", "scalerunnergh"]
+CMD ["--config", "/etc/scalerunnergh/config.json"]

@@ -70,17 +70,22 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	a.Metrics.Set(metrics.HostSlotsMax, "", float64(cfg.Host.MaxRunners))
 
+	// Listeners outlive ctx during the drain, so job-started messages still arrive.
+	runCtx, stopListeners := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopListeners()
 	var wg sync.WaitGroup
 	for _, ss := range cfg.ScaleSets {
 		svc, err := a.newService(ss, backends[ss.Backend])
 		if err != nil {
+			stopListeners()
+			wg.Wait()
 			return fmt.Errorf("scale set %s: %w", ss.Name, err)
 		}
 		a.scalers = append(a.scalers, svc.scaler)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			svc.run(ctx)
+			svc.run(runCtx)
 		}()
 	}
 
@@ -88,6 +93,9 @@ func (a *App) Run(ctx context.Context) error {
 		Path:   cfg.Host.KillSwitchFile,
 		Logger: a.Logger,
 		OnChange: func(active bool) {
+			if ctx.Err() != nil {
+				return // shutting down: the pool stays paused
+			}
 			a.Pool.SetPaused(active)
 			paused := 0.0
 			if active {
@@ -104,11 +112,14 @@ func (a *App) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ks.Run(ctx)
+		ks.Run(runCtx)
 	}()
 
 	<-ctx.Done()
+	a.Pool.SetPaused(true) // no new runners from here on
+	a.drain(cfg.Host.DrainTimeout.Duration)
 	a.Logger.Info("shutting down: stopping runners")
+	stopListeners()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	for _, s := range a.scalers {
@@ -116,6 +127,33 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// drainSettle is how long idle runners get to pick up an already assigned job
+// before the drain treats them as unused.
+var drainSettle = 20 * time.Second
+
+// drain waits for running jobs to finish, up to timeout. Runners that stay
+// idle are not waited for.
+func (a *App) drain(timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	start := time.Now()
+	a.Logger.Info("draining: waiting for running jobs", "timeout", timeout)
+	for time.Since(start) < timeout {
+		alive, busy := 0, 0
+		for _, s := range a.scalers {
+			al, b := s.Count()
+			alive, busy = alive+al, busy+b
+		}
+		if alive == 0 || (busy == 0 && time.Since(start) >= drainSettle) {
+			a.Logger.Info("drain complete", "after", time.Since(start).Round(time.Second))
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	a.Logger.Warn("drain timeout: stopping jobs that are still running")
 }
 
 // Status is served at /status.

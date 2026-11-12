@@ -1,0 +1,35 @@
+# One ScaleRunnerGH per Docker host. The image is updated by DockWarden;
+# nothing here is started by hand after the first `docker compose up -d`.
+#
+# stop_grace_period must be longer than host.drain_timeout in config.json,
+# so an image update lets running jobs finish.
+services:
+  scalerunnergh:
+    image: ghcr.io/emon5122/scalerunnergh:1
+    container_name: scalerunnergh
+    restart: unless-stopped
+    stop_grace_period: 50m
+    command: ["--config", "/etc/scalerunnergh/config.json"]
+    volumes:
+      # The orchestrator drives the host daemon; job containers never get this socket.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.json:/etc/scalerunnergh/config.json:ro
+      # `touch ./control/STOP` is the kill switch (host.kill_switch_file: /control/STOP).
+      - ./control:/control:ro
+    secrets:
+      - github_pat
+    ports:
+      - "127.0.0.1:9090:9090"
+    labels:
+      - "dockwarden.enable=true"
+      - "dockwarden.stop-signal=SIGTERM"
+      - "dockwarden.stop-timeout=3000"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+secrets:
+  github_pat:
+    file: ./secrets/github_pat

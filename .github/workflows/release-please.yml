@@ -1,0 +1,21 @@
+name: release-please
+
+on:
+    push:
+        branches: [main]
+
+permissions:
+    contents: write
+    issues: write
+    pull-requests: write
+
+jobs:
+    release-please:
+        runs-on: ubuntu-latest
+        steps:
+            # GH_TOKEN (a PAT) is needed so the release PR and the tag trigger CI
+            # and the release workflow; the default token cannot do that.
+            - uses: googleapis/release-please-action@v5
+              with:
+                  release-type: go
+                  token: ${{ secrets.GH_TOKEN }}

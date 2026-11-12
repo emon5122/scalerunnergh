@@ -1,254 +1,244 @@
 # ScaleRunnerGH
 
-A fully ephemeral, GPU-aware, auto-scaling GitHub Actions runner orchestrator built with Go and Docker.
+Ephemeral, auto-scaling GitHub Actions runners for your own hosts, built with Go.
 
-Each queued job gets its own isolated runner container that spins up on demand and self-destructs after completion. Supports multiple organizations and repositories simultaneously.
+One ScaleRunnerGH runs per host. It serves one or more GitHub **runner scale sets**
+(org-level or repo-level), starts a fresh runner for every job and removes it afterwards.
+A runner is either a container (Docker backend) or a process on the host (native backend,
+Linux and Windows). All scale sets on a host share one slot pool, so a small box never runs
+more than it can take.
 
-## Architecture
+## How it works
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    ScaleRunnerGH Orchestrator             │
-│                                                          │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │   Job    │  │   Resource   │  │   Docker Runner  │   │
-│  │ Monitor  │──│   Manager    │──│    Launcher      │   │
-│  │ (Poller) │  │ (GPU/CPU)    │  │  (Ephemeral)     │   │
-│  └────┬─────┘  └──────────────┘  └────────┬─────────┘  │
-│       │                                     │            │
-│  ┌────┴─────┐                    ┌─────────┴────────┐   │
-│  │ GitHub   │                    │  Job Tracker &   │   │
-│  │ API      │                    │  Cleanup         │   │
-│  │ Client   │                    └──────────────────┘   │
-│  └──────────┘                                           │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │              Prometheus Metrics (:9090)           │   │
-│  └──────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────┘
-         │                              │
-         ▼                              ▼
-┌────────────────┐           ┌────────────────┐
-│ GitHub Actions │           │ Docker Daemon   │
-│ API            │           │                 │
-└────────────────┘           │ ┌────┐ ┌────┐  │
-                             │ │ R1 │ │ R2 │  │
-                             │ └────┘ └────┘  │
-                             │ ┌────┐         │
-                             │ │ R3 │ ...     │
-                             │ └────┘         │
-                             └────────────────┘
+GitHub ──(long poll, outbound only)──▶ ScaleRunnerGH ──▶ backend ──▶ one runner per job
+          jobs assigned to the           slot pool        docker: container (+ private dockerd)
+          scale set, by label            guard            native: process in a clean directory
 ```
+
+1. **Register.** Each scale set is registered in a runner group at GitHub, with its name and
+   extra labels as `runs-on` labels. GitHub matches jobs to it; nothing is polled per repo.
+2. **Listen.** A long-poll message session reports how many jobs are assigned. It is
+   outbound only, so it works behind NAT. ScaleRunnerGH tells GitHub its current capacity,
+   so GitHub never assigns more than the host can run.
+3. **Guard.** Jobs from public repositories and pull requests from forks are never acquired.
+4. **Start.** For each assigned job a slot is taken from the host pool and a runner starts
+   with a single-use just-in-time (JIT) config. No registration token is involved.
+5. **Clean up.** The runner exits after one job. Its container (with volumes) or its job
+   directory is removed and the slot is returned.
+
+It is built on [`actions/scaleset`](https://github.com/actions/scaleset), GitHub's Go client
+for the runner scale set API.
 
 ## Features
 
-- **Ephemeral Isolation**: Every job runs in its own container; the host remains clean
-- **Multi-Org & Multi-Repo**: Monitor jobs across multiple GitHub organizations and repositories
-- **GPU-Aware Scaling**: Tracks available GPUs to prevent conflicts between GPU workloads
-- **Dynamic Scaling**: Runners created on demand and destroyed automatically
-- **Label-Based Routing**: Filter jobs by labels (`gpu`, `cpu`, `docker`, etc.)
-- **Resource Limits**: Configurable max runners, GPUs, CPUs, and memory
-- **Prometheus Metrics**: Built-in `/metrics` endpoint for monitoring
-- **Grafana Dashboard**: Pre-built dashboard for runner visualization
-- **Zero Dependencies**: Pure Go with no external runtime dependencies
-- **Per-Repo PAT Support**: Different tokens for different orgs/repos
+- **One runner per job**, in a container or as a native process; nothing carries over.
+- **Org-level and repo-level** scale sets, several orgs per host.
+- **Host slot pool**: `max_runners` for the host, `max_heavy` for heavy scale sets
+  (for example one heavy job at a time on a small box).
+- **Hard limits** per job container: CPUs, memory (no swap on top), pids, CPU shares, I/O
+  weight, OOM score, optional disk size and GPUs.
+- **Production-host protection**: a load and memory gate, low priority, and a kill-switch
+  file that stops new jobs at once (and running ones, if configured).
+- **Private repos only**: the runner group must refuse public repositories, and a guard
+  re-checks every job. Every check fails closed.
+- **Docker inside jobs without the host socket**: an optional private dockerd inside the job
+  container, destroyed with it.
+- **Pinned toolchains**: runner images with fixed tool versions (container mode), and a
+  runner release pinned by version and sha256 (native mode).
+- **Safe restarts**: leftovers of an earlier process are removed at start; on shutdown
+  running jobs may finish (`drain_timeout`).
+- **PAT or GitHub App** credentials, read from files, never from the config or the
+  environment.
+- **Prometheus metrics** and a Grafana dashboard.
 
-## Quick Start
-
-### Option 1: Environment Variables (Single Repo)
-
-```bash
-export GITHUB_PAT=ghp_your_token_here
-export GITHUB_OWNER=my-org
-export GITHUB_REPO=my-app
-export RUNNER_LABELS=self-hosted,gpu
-export GPU_ENABLED=true
-export MAX_RUNNERS=5
-export MAX_GPUS=4
-
-./scalerunnergh
-```
-
-### Option 2: Config File (Multi-Org/Repo)
+## Quick start (Docker host)
 
 ```bash
-cp config.example.json config.json
-# Edit config.json with your repos and tokens
-./scalerunnergh --config config.json
+mkdir -p /srv/scalerunnergh/{secrets,control} && cd /srv/scalerunnergh
+cp <repo>/deploy/compose.yml .
+cp <repo>/examples/vps.json config.json      # edit: org URL, runner group, image tag
+install -m 600 /dev/stdin secrets/github_pat # paste the token, Ctrl-D
+docker compose up -d
 ```
 
-### Option 3: Docker Compose (Full Stack)
+Then use the scale set in a workflow:
 
-```bash
-cp config.example.json config.json
-# Edit config.json
-docker-compose up -d
+```yaml
+jobs:
+  build:
+    runs-on: srg-vps        # the scale set name, or [srg-vps, vps] with extra labels
 ```
 
-This starts the orchestrator, Prometheus, and Grafana. Access:
-- Grafana: http://localhost:3000 (admin/admin)
-- Prometheus: http://localhost:9091
-- Metrics: http://localhost:9090/metrics
-- Health: http://localhost:9090/health
+The compose file carries DockWarden labels, so the orchestrator image is updated without
+hand work. `stop_grace_period` must be longer than `host.drain_timeout`.
+
+### Native mode (no Docker)
+
+- **Linux**: put the released binary in `/usr/local/bin`, a config like
+  [`examples/native-linux.json`](examples/native-linux.json) in `/etc/scalerunnergh/`, and
+  enable [`deploy/systemd/scalerunnergh.service`](deploy/systemd/scalerunnergh.service).
+  Run it as a dedicated non-root user.
+- **Windows**: `scalerunnergh.exe` runs as a Windows service. Use
+  [`deploy/windows/install.ps1`](deploy/windows/install.ps1) with a config like
+  [`examples/native-windows.json`](examples/native-windows.json).
+
+In native mode the job uses the tools installed on the host. Every job still gets its own
+copy of the pinned runner release and its own work directory, both deleted afterwards.
 
 ## Configuration
 
-### Config File Format
+One JSON file per host. Unknown fields are errors. Validate with
+`scalerunnergh --config config.json --check`. Full examples:
+[`vps.json`](examples/vps.json), [`production-host.json`](examples/production-host.json),
+[`native-linux.json`](examples/native-linux.json),
+[`native-windows.json`](examples/native-windows.json).
+
+### `host`
+
+| Field | Meaning | Default |
+|---|---|---|
+| `name` | Host name used in runner and container names | OS hostname |
+| `max_runners` | Concurrent runners on this host, all scale sets together | required |
+| `max_heavy` | Concurrent runners of scale sets marked `heavy` | `0` (no extra cap) |
+| `max_load_per_core` | No new runner while `load1 / cores` is above this (Linux) | off |
+| `min_mem_available_mb` | No new runner while `MemAvailable` is below this (Linux) | off |
+| `kill_switch_file` | While this file exists, no new jobs are taken | off |
+| `kill_switch_stops_running` | The kill switch also stops running jobs | `false` |
+| `idle_timeout` | Surplus idle runners are removed after this long | `3m` |
+| `max_job_duration` | A runner is force-stopped after this long | `6h30m` |
+| `drain_timeout` | On shutdown, let running jobs finish for up to this long | `0` |
+
+### `auth` (host default, or per scale set)
 
 ```json
-{
-  "repos": [
-    {
-      "owner": "my-org",
-      "repo": "my-app",
-      "labels": ["self-hosted", "gpu", "docker"]
-    },
-    {
-      "owner": "another-org",
-      "repo": "",
-      "labels": ["self-hosted"],
-      "pat": "ghp_org_specific_token"
-    }
-  ],
-  "global_pat": "ghp_your_default_token",
-  "poll_interval": "10s",
-  "resources": {
-    "max_runners": 10,
-    "max_gpus": 4,
-    "max_cpus": 32,
-    "max_mem_mb": 65536
-  },
-  "docker": {
-    "image": "scalerunnergh-runner:latest",
-    "gpu_enabled": true,
-    "network_mode": "bridge"
-  },
-  "metrics": {
-    "enabled": true,
-    "address": ":9090"
-  },
-  "log_level": "info"
-}
+{ "pat_file": "/run/secrets/github_pat" }
 ```
-
-### Org-Level Runners
-
-Set `repo` to an empty string to register runners at the organization level:
 
 ```json
-{
-  "owner": "my-org",
-  "repo": "",
-  "labels": ["self-hosted"]
-}
+{ "app": { "client_id": "Iv23...", "installation_id": 12345678, "private_key_file": "/run/secrets/app_key" } }
 ```
 
-### Environment Variables
+- **PAT (classic)**: `repo` (the guard reads repositories and runs), plus `admin:org` for org-level scale sets.
+- **GitHub App** (recommended): organization permission *Self-hosted runners: read and
+  write*, repository permissions *Metadata: read* and *Actions: read*. An App installation
+  belongs to one org, so set `auth` per scale set when a host serves several orgs.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GITHUB_PAT` | GitHub Personal Access Token | required |
-| `GITHUB_OWNER` | GitHub org or user | required |
-| `GITHUB_REPO` | Repository name | optional (org-level if empty) |
-| `RUNNER_LABELS` | Comma-separated labels | `self-hosted` |
-| `POLL_INTERVAL` | How often to check for jobs | `10s` |
-| `MAX_RUNNERS` | Max concurrent runners | `5` |
-| `MAX_GPUS` | Max GPUs to allocate | `0` (unlimited) |
-| `RUNNER_IMAGE` | Docker image for runners | `ghcr.io/actions/runner:latest` |
-| `GPU_ENABLED` | Enable GPU passthrough | `false` |
-| `METRICS_ADDR` | Metrics server address | `:9090` |
-| `LOG_LEVEL` | Log level | `info` |
+### `scale_sets[]`
 
-## Building
+| Field | Meaning |
+|---|---|
+| `name` | Scale set name; also a `runs-on` label |
+| `url` | `https://github.com/<org>` or `https://github.com/<org>/<repo>` |
+| `runner_group` | Runner group to register in. It must not allow public repositories |
+| `labels` | Extra `runs-on` labels |
+| `backend` | `docker` or `native` |
+| `min_runners` / `max_runners` | Idle runners kept ready / cap for this scale set |
+| `heavy` | Counts against `host.max_heavy` |
+| `image`, `dind` | Docker backend: runner image, private dockerd inside the job container |
+| `limits` | `cpus`, `memory_mb`, `pids`, `cpu_shares`, `blkio_weight`, `oom_score_adj`, `storage_opt_size`, `gpus` (docker); `nice` (native) |
+| `allow_repos` | Optional list of repos allowed to use this scale set |
+| `auth` | Overrides the host-level `auth` |
 
-### From Source
+### `docker` and `native`
+
+| Field | Meaning |
+|---|---|
+| `docker.network`, `docker.runtime` | Network and runtime (for example `sysbox-runc`) for job containers |
+| `docker.registry_mirror` | Pull-through cache passed to the dockerd inside dind jobs |
+| `docker.extra_args` | Extra `docker create` flags (escape hatch) |
+| `native.root` | Directory for the runner release, job directories and logs |
+| `native.runner_version`, `native.runner_sha256` | Pinned `actions/runner` release for this OS and architecture |
+
+## Safety model
+
+- **Fork pull requests and public repos never reach a runner.** Three layers: the org
+  setting that disables fork-PR workflows, a runner group with *allow public repositories*
+  off (checked at start; ScaleRunnerGH refuses to register otherwise), and the per-job guard.
+- **No host Docker socket in jobs.** Only the orchestrator talks to the host daemon. With
+  `dind: true` the job container is privileged; that is acceptable only for trusted,
+  private repos. Set `docker.runtime` to `sysbox-runc` to avoid privileged containers.
+- **Secrets**: credentials are read from files. The JIT config is copied into the
+  container as a root-only file (docker) or passed to that one child process (native); it
+  is single-use and never appears on a command line, in `docker inspect` or in logs.
+- **Native mode shares the host** with the job. Use it only for trusted repos, under a
+  dedicated unprivileged account.
+
+## Production hosts
+
+See [`examples/production-host.json`](examples/production-host.json): per-job caps,
+`cpu_shares: 128` and `oom_score_adj: 1000` so CI always loses against production
+workloads, the load and memory gate, and the kill switch:
 
 ```bash
-go build -o scalerunnergh ./cmd/scalerunnergh
+touch /srv/scalerunnergh/control/STOP   # no new jobs (and stop running ones, if configured)
+rm /srv/scalerunnergh/control/STOP      # resume
 ```
 
-### Docker Image (Orchestrator)
+## Runner images
 
-```bash
-docker build -t scalerunnergh .
-```
+`ghcr.io/emon5122/scalerunnergh-runner:<flavor>-<version>`, built from
+[`docker/runner/Dockerfile`](docker/runner/Dockerfile):
 
-### Docker Image (Runner)
+| Flavor | Contents |
+|---|---|
+| `base` | Ubuntu 24.04, actions/runner, git, build tools, Docker engine + buildx + compose |
+| `node` | base + Node.js, pnpm |
+| `go` | base + Go |
+| `python` | base + Python 3, uv |
+| `media` | node + ffmpeg, sox |
+| `full` | node + Go + Python + ffmpeg |
 
-```bash
-docker build -t scalerunnergh-runner docker/runner/
-```
-
-## Testing
-
-```bash
-# Unit tests
-go test ./... -v
-
-# E2E integration tests (mock GitHub API)
-go test -tags integration ./tests/integration/ -v
-
-# With real GitHub API (requires GITHUB_PAT)
-GITHUB_PAT=ghp_xxx go test -tags integration ./tests/integration/ -v
-```
+There is no `sudo` in the images: tools come from the image, pinned in the Dockerfile.
+The images only start through ScaleRunnerGH (the entrypoint needs the JIT config file).
 
 ## Metrics
 
-The `/metrics` endpoint exposes Prometheus-compatible metrics:
+`/metrics` (Prometheus), `/health`, `/status` (JSON) on `metrics.address`.
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `scalerunner_active_runners` | gauge | Currently running containers |
-| `scalerunner_queued_jobs` | gauge | Total queued jobs across all repos |
-| `scalerunner_total_launched` | counter | Total runners launched |
-| `scalerunner_total_completed` | counter | Runners completed successfully |
-| `scalerunner_total_failed` | counter | Runners that failed |
-| `scalerunner_used_gpus` | gauge | GPUs currently in use |
-| `scalerunner_available_gpus` | gauge | GPUs available |
-| `scalerunner_poll_errors_total` | counter | GitHub API poll errors |
-| `scalerunner_launch_errors_total` | counter | Runner launch errors |
-| `scalerunner_token_errors_total` | counter | Registration token errors |
-| `scalerunner_repo_queued_jobs` | gauge | Queued jobs per repo |
+| Metric | Type | Meaning |
+|---|---|---|
+| `scalerunner_runners_active{scale_set}` | gauge | Runners alive |
+| `scalerunner_runners_busy{scale_set}` | gauge | Runners running a job |
+| `scalerunner_jobs_assigned{scale_set}` | gauge | Jobs GitHub assigned to the scale set |
+| `scalerunner_capacity_blocked{scale_set}` | gauge | 1 while jobs wait for a slot, the gate or the kill switch |
+| `scalerunner_runners_started_total{scale_set}` | counter | Runners started |
+| `scalerunner_runners_completed_total{scale_set}` | counter | Runners that exited cleanly |
+| `scalerunner_runners_failed_total{scale_set}` | counter | Runners that failed or were force-stopped |
+| `scalerunner_start_errors_total{scale_set}` | counter | Runner start errors |
+| `scalerunner_jobs_refused_total{scale_set}` | counter | Jobs refused by the guard |
+| `scalerunner_listener_errors_total{scale_set}` | counter | Message session errors |
+| `scalerunner_host_slots_used`, `scalerunner_host_slots_max` | gauge | Host slot pool |
+| `scalerunner_host_paused` | gauge | 1 while the kill switch is on |
 
-## Project Structure
+A Prometheus scrape config and a Grafana dashboard are in [`deploy/`](deploy/).
 
-```
-scalerunnergh/
-├── cmd/scalerunnergh/       # CLI entrypoint
-│   └── main.go
-├── internal/
-│   ├── config/              # Multi-org/repo config system
-│   ├── github/              # GitHub API client
-│   ├── metrics/             # Prometheus metrics
-│   ├── orchestrator/        # Main polling loop & job dispatch
-│   ├── resource/            # GPU/CPU/memory resource manager
-│   └── runner/              # Docker container launcher
-├── tests/integration/       # E2E & integration tests
-├── docker/
-│   └── runner/              # Ephemeral runner Dockerfile
-├── deploy/
-│   ├── prometheus/          # Prometheus config
-│   └── grafana/             # Grafana dashboards & provisioning
-├── Dockerfile               # Orchestrator image
-├── docker-compose.yml       # Full monitoring stack
-└── config.example.json      # Example configuration
+## Development
+
+```bash
+./scripts/ci.sh                 # the whole CI suite (needs Docker)
+SKIP_DOCKER=1 ./scripts/ci.sh   # without the Docker lanes
+go test ./... -race
 ```
 
-## How It Works
+```
+cmd/scalerunnergh/     entrypoint, Windows service mode
+internal/app/          wiring: backends, pool, kill switch, one listener per scale set
+internal/scaler/       scale set messages -> runners
+internal/backend/      docker and native runner backends
+internal/pool/         host slot pool
+internal/hostgate/     load/memory gate, kill switch
+internal/guard/        public-repo and fork-PR guard
+internal/ghapi/        small GitHub REST client (PAT, App)
+internal/runnerdist/   pinned runner release for native mode
+internal/config/       host config
+docker/runner/         runner images
+deploy/, examples/     compose, systemd, Windows service, example configs
+docs/rollout-plan.md   audit, design decisions and rollout plan
+```
 
-1. **Poll**: The orchestrator polls GitHub Actions API for queued workflow jobs at a configurable interval
-2. **Match**: Jobs are filtered by label to determine which runner config handles them
-3. **Token**: A short-lived registration token is generated via the GitHub API
-4. **Allocate**: The resource manager checks if there's capacity (runner slots, GPUs, etc.)
-5. **Launch**: A Docker container is created with `--ephemeral` runner configuration
-6. **Execute**: The runner picks up the job, executes it, and exits
-7. **Cleanup**: Resources are released, the container is removed, and metrics are updated
-
-## GitHub Token Permissions
-
-Create a fine-grained PAT with these permissions:
-- **Repository**: `Actions: Read and write` (for listing runs/jobs and creating registration tokens)
-- **Organization**: `Self-hosted runners: Read and write` (for org-level runners)
+Releases are cut by release-please; a version tag publishes the images to ghcr and attaches
+the binaries to the GitHub release.
 
 ## License
 

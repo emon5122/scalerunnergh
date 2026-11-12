@@ -1,0 +1,9 @@
+.git
+.github
+.claude
+docs
+deploy
+examples
+docker
+tests
+*.md

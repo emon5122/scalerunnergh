@@ -1,0 +1,20 @@
+{
+  "host": { "name": "pc09-win", "max_runners": 1, "drain_timeout": "30m" },
+  "auth": { "pat_file": "C:\\ProgramData\\scalerunnergh\\github_pat" },
+  "native": {
+    "root": "C:\\ProgramData\\scalerunnergh\\work",
+    "runner_version": "2.338.2",
+    "runner_sha256": "a1f17aa987fc8158bc7521d284912267a0d01b7c2c4684b33c86783b5e8221cc"
+  },
+  "scale_sets": [
+    {
+      "name": "srg-pc09-win",
+      "url": "https://github.com/my-org",
+      "runner_group": "pc09-private",
+      "labels": ["pc09", "Windows"],
+      "backend": "native",
+      "limits": { "nice": 10 }
+    }
+  ],
+  "metrics": { "enabled": true, "address": "127.0.0.1:9090" }
+}

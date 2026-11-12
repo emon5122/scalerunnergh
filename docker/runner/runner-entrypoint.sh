@@ -1,48 +1,27 @@
 #!/bin/bash
+# Entrypoint of an ephemeral ScaleRunnerGH runner container.
+#
+# The orchestrator copies the single-use JIT runner config to /srg/jitconfig
+# before the container starts. This script reads and deletes it, optionally
+# starts a private dockerd (SRG_DIND=1), drops to the runner user and runs
+# exactly one job. The JIT config is never written to a command line or a log.
 set -euo pipefail
 
-# Entrypoint for ephemeral GitHub Actions runner container.
-# This script configures the runner using environment variables,
-# runs the job, and then exits (ephemeral mode).
+JIT_FILE=/srg/jitconfig
 
-RUNNER_NAME="${RUNNER_NAME:-$(hostname)}"
-RUNNER_WORK_FOLDER="${RUNNER_WORK_FOLDER:-/_work}"
-RUNNER_LABELS="${RUNNER_LABELS:-self-hosted}"
-RUNNER_TOKEN="${RUNNER_TOKEN:?RUNNER_TOKEN is required}"
-
-echo "==============================="
-echo " ScaleRunnerGH Ephemeral Runner"
-echo "==============================="
-echo "Runner Name: ${RUNNER_NAME}"
-echo "Labels: ${RUNNER_LABELS}"
-
-# Determine registration URL
-if [ -n "${RUNNER_REPOSITORY:-}" ]; then
-    REGISTRATION_URL="${RUNNER_REPOSITORY}"
-    echo "Repository: ${REGISTRATION_URL}"
-elif [ -n "${RUNNER_ORGANIZATION:-}" ]; then
-    REGISTRATION_URL="https://github.com/${RUNNER_ORGANIZATION}"
-    echo "Organization: ${RUNNER_ORGANIZATION}"
-else
-    echo "ERROR: Either RUNNER_REPOSITORY or RUNNER_ORGANIZATION must be set"
-    exit 1
+if [ ! -s "${JIT_FILE}" ]; then
+    echo "srg: no JIT config at ${JIT_FILE}; this image is started by scalerunnergh" >&2
+    exit 64
 fi
+ACTIONS_RUNNER_INPUT_JITCONFIG="$(cat "${JIT_FILE}")"
+rm -f "${JIT_FILE}"
+export ACTIONS_RUNNER_INPUT_JITCONFIG
 
-# Configure the runner
-./config.sh \
-    --url "${REGISTRATION_URL}" \
-    --token "${RUNNER_TOKEN}" \
-    --name "${RUNNER_NAME}" \
-    --labels "${RUNNER_LABELS}" \
-    --work "${RUNNER_WORK_FOLDER}" \
-    --ephemeral \
-    --unattended \
-    --replace \
-    --disableupdate
+if [ "${SRG_DIND:-}" = "1" ]; then
+    /usr/local/bin/srg-dind-start
+fi
+unset SRG_DIND SRG_REGISTRY_MIRROR
 
-echo "Runner configured. Starting..."
-
-# Run the runner (will exit after one job due to --ephemeral)
-./run.sh
-
-echo "Runner finished. Container will self-destruct."
+cd /home/runner
+export HOME=/home/runner USER=runner LOGNAME=runner
+exec setpriv --reuid=runner --regid=runner --init-groups ./run.sh

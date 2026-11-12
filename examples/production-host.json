@@ -1,0 +1,40 @@
+{
+  "host": {
+    "name": "prod-box",
+    "max_runners": 2,
+    "max_heavy": 1,
+    "max_load_per_core": 0.7,
+    "min_mem_available_mb": 4096,
+    "kill_switch_file": "/etc/scalerunnergh/STOP",
+    "kill_switch_stops_running": true,
+    "max_job_duration": "2h",
+    "drain_timeout": "30m"
+  },
+  "scale_sets": [
+    {
+      "name": "srg-prod-org-a",
+      "url": "https://github.com/org-a",
+      "runner_group": "ci-private",
+      "labels": ["Linux"],
+      "backend": "docker",
+      "image": "ghcr.io/emon5122/scalerunnergh-runner:full-1.0.0",
+      "dind": true,
+      "heavy": true,
+      "auth": { "app": { "client_id": "Iv23xxxxxxxx", "installation_id": 12345678, "private_key_file": "/run/secrets/org_a_app_key" } },
+      "limits": { "cpus": 2, "memory_mb": 4096, "pids": 2048, "cpu_shares": 128, "blkio_weight": 100, "oom_score_adj": 1000 }
+    },
+    {
+      "name": "srg-prod-org-b",
+      "url": "https://github.com/org-b",
+      "runner_group": "ci-private",
+      "labels": ["Linux"],
+      "backend": "docker",
+      "image": "ghcr.io/emon5122/scalerunnergh-runner:node-1.0.0",
+      "dind": false,
+      "auth": { "app": { "client_id": "Iv23yyyyyyyy", "installation_id": 23456789, "private_key_file": "/run/secrets/org_b_app_key" } },
+      "limits": { "cpus": 1, "memory_mb": 2048, "pids": 1024, "cpu_shares": 128, "blkio_weight": 100, "oom_score_adj": 1000 }
+    }
+  ],
+  "metrics": { "enabled": true, "address": "127.0.0.1:9090" },
+  "log_level": "info"
+}

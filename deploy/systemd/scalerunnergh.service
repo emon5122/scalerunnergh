@@ -1,0 +1,20 @@
+# Native mode on a Linux host (no Docker needed): a runner process per job.
+# Run as a dedicated non-root user; the GitHub runner refuses to run as root.
+[Unit]
+Description=ScaleRunnerGH (ephemeral GitHub Actions runners)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=srg
+Group=srg
+ExecStart=/usr/local/bin/scalerunnergh --config /etc/scalerunnergh/config.json
+Restart=always
+RestartSec=10
+# Longer than host.drain_timeout, so a restart lets running jobs finish.
+TimeoutStopSec=2100
+KillMode=mixed
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

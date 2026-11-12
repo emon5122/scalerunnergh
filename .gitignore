@@ -1,18 +1,15 @@
-coverage
-coverage.out
-*.out
-scalerunnergh.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-*.test
-go.work
-.idea/
-.vscode/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-config.json
+# Binaries
+/scalerunnergh
+*.exe
 /dist/
+
+# Local config and secrets
+/config.json
+secrets/
+*.pem
+
+# Go
+vendor/
+*.test
+*.out
+*.ci-bak

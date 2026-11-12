@@ -56,6 +56,11 @@ type HostConfig struct {
 	IdleTimeout Duration `json:"idle_timeout"`
 	// MaxJobDuration force-stops a runner after this long (default 6h30m).
 	MaxJobDuration Duration `json:"max_job_duration"`
+	// DrainTimeout: on shutdown (SIGTERM, service stop, image update) take no
+	// new jobs and let running jobs finish for up to this long before
+	// stopping them (default 0 = stop at once). Give the service manager at
+	// least this much stop time.
+	DrainTimeout Duration `json:"drain_timeout"`
 }
 
 // AuthConfig names the credential files for one GitHub org or repo.
@@ -229,6 +234,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Host.MaxJobDuration.Duration <= 0 {
 		c.Host.MaxJobDuration.Duration = 6*time.Hour + 30*time.Minute
+	}
+	if c.Host.DrainTimeout.Duration < 0 {
+		return errors.New("config: host.drain_timeout must be >= 0")
 	}
 	if c.Docker.Binary == "" {
 		c.Docker.Binary = "docker"

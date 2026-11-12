@@ -1,0 +1,21 @@
+{
+  "host": { "name": "pc09-wsl", "max_runners": 2, "max_heavy": 1, "drain_timeout": "30m" },
+  "auth": { "pat_file": "/etc/scalerunnergh/github_pat" },
+  "native": {
+    "root": "/var/lib/scalerunnergh",
+    "runner_version": "2.338.2",
+    "runner_sha256": "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"
+  },
+  "scale_sets": [
+    {
+      "name": "srg-pc09",
+      "url": "https://github.com/my-org",
+      "runner_group": "pc09-private",
+      "labels": ["pc09", "Linux"],
+      "backend": "native",
+      "heavy": true,
+      "limits": { "nice": 10 }
+    }
+  ],
+  "metrics": { "enabled": true, "address": "127.0.0.1:9090" }
+}
