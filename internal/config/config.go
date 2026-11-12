@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -477,13 +478,19 @@ func SanitizeName(s string) string {
 // under Windows, Users or Program Files. A dedicated directory such as
 // C:\ProgramData\scalerunnergh\work is expected.
 func runAsRootAllowed(root string) error {
-	r := strings.ToLower(strings.TrimRight(strings.ReplaceAll(root, "/", `\`), `\`))
-	parts := strings.Split(r, `\`)
+	slash := strings.ToLower(strings.ReplaceAll(root, `\`, "/"))
+	if strings.Contains(slash, "/../") || strings.HasSuffix(slash, "/..") {
+		return fmt.Errorf("config: native.run_as: native.root %q must not contain '..'", root)
+	}
+	parts := strings.Split(strings.TrimRight(path.Clean(slash), "/"), "/")
 	if len(parts) < 3 {
 		return fmt.Errorf("config: native.run_as: native.root %q is too high up; use a dedicated directory such as C:\\ProgramData\\scalerunnergh\\work", root)
 	}
 	switch parts[1] {
 	case "windows", "users", "program files", "program files (x86)":
+		return fmt.Errorf("config: native.run_as: native.root %q is inside a system directory", root)
+	}
+	if parts[1] == "programdata" && parts[2] == "microsoft" {
 		return fmt.Errorf("config: native.run_as: native.root %q is inside a system directory", root)
 	}
 	return nil

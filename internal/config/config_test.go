@@ -186,7 +186,7 @@ func TestNativeRunAsValidation(t *testing.T) {
 	if cfg.Native.RunAs != `NT AUTHORITY\NETWORK SERVICE` {
 		t.Fatalf("run_as not normalised: %q", cfg.Native.RunAs)
 	}
-	for _, bad := range []string{`C:\\`, `C:\\ProgramData`, `C:\\Windows\\Temp\\srg`, `C:\\Users\\x\\srg`} {
+	for _, bad := range []string{`C:\\`, `C:\\ProgramData`, `C:\\Windows\\Temp\\srg`, `C:\\Users\\x\\srg`, `C:\\\\Windows\\x`, `C:\\ProgramData\\..\\Windows\\x`, `C:\\ProgramData\\Microsoft\\x`} {
 		js := strings.Replace(strings.Replace(base, "RUNAS", `"NT AUTHORITY\\NETWORK SERVICE"`, 1), `C:\\ProgramData\\srg\\work`, bad, 1)
 		if _, err := Parse([]byte(js)); err == nil || !strings.Contains(err.Error(), "native.root") {
 			t.Errorf("root %s: want refusal, got %v", bad, err)

@@ -14,7 +14,9 @@ args=("$@")
 # may be the target: running "as postgres" silently as runner would mislead.
 while [ "${#args[@]}" -gt 0 ]; do
     case "${args[0]}" in
-        -u | -g | --user | --group)
+        -g | --group) args=("${args[@]:2}") ;; # group: irrelevant without root
+        --group=* | -g?*) args=("${args[@]:1}") ;;
+        -u | --user)
             t="${args[1]:-}"
             args=("${args[@]:2}")
             if [ -n "$t" ] && [ "$t" != root ] && [ "$t" != "$(id -un)" ] && [ "$t" != 0 ]; then
