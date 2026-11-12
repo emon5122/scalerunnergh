@@ -33,6 +33,9 @@ func TestClientGets(t *testing.T) {
 		case "/repos/o/secondary":
 			w.Header().Set("Retry-After", "30")
 			w.WriteHeader(http.StatusForbidden)
+		case "/repos/o/secondary-body":
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes."}`)
 		case "/repos/o/forbidden":
 			w.WriteHeader(http.StatusForbidden)
 		case "/repos/o/busy":
@@ -61,7 +64,7 @@ func TestClientGets(t *testing.T) {
 		t.Errorf("want 404 error, got %v", err)
 	}
 	for repo, want := range map[string][2]bool{ // {IsDenied, IsNotFound}
-		"forbidden": {true, false}, "limited": {false, false}, "secondary": {false, false},
+		"forbidden": {true, false}, "limited": {false, false}, "secondary": {false, false}, "secondary-body": {false, false},
 		"busy": {false, false}, "broken": {false, false}, "missing": {false, true},
 	} {
 		_, err := c.GetRepo(ctx, "o", repo)
@@ -70,7 +73,8 @@ func TestClientGets(t *testing.T) {
 		}
 	}
 	bad := &Client{BaseURL: srv.URL, Tokens: StaticToken("secret-value")}
-	if _, err := bad.GetRepo(ctx, "o", "r"); err == nil || !IsDenied(err) || strings.Contains(err.Error(), "secret-value") {
+	// 401: the credential is broken; retryable, not a denial, and never echoed.
+	if _, err := bad.GetRepo(ctx, "o", "r"); err == nil || IsDenied(err) || IsNotFound(err) || strings.Contains(err.Error(), "secret-value") {
 		t.Errorf("error must not contain the token: %v", err)
 	}
 }

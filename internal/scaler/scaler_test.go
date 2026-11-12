@@ -174,11 +174,23 @@ func (g *flakyGuard) AllowJob(context.Context, string, string, int64) (bool, str
 	return true, "", nil
 }
 
-type fakeAcquirer struct{ got [][]int64 }
+type fakeAcquirer struct {
+	got  [][]int64
+	only map[int64]bool // when set, only these ids are confirmed
+}
 
 func (a *fakeAcquirer) AcquireJobs(_ context.Context, ids []int64) ([]int64, error) {
 	a.got = append(a.got, ids)
-	return ids, nil
+	if a.only == nil {
+		return ids, nil
+	}
+	var confirmed []int64
+	for _, id := range ids {
+		if a.only[id] {
+			confirmed = append(confirmed, id)
+		}
+	}
+	return confirmed, nil
 }
 
 type rig struct {
@@ -578,19 +590,91 @@ func TestFastJobDoesNotPauseStarts(t *testing.T) {
 	r.s.Close(ctx)
 }
 
-func TestRunningJobThatCannotBeVerifiedIsStopped(t *testing.T) {
-	g := fakeGuard{err: map[string]error{}}
+func TestRunningJobIsKeptWhenItCannotBeRecheckedYet(t *testing.T) {
+	g := fakeGuard{err: map[string]error{}, deny: map[string]string{}}
 	r := newRig(pool.New(1, 0, nil), config.ScaleSetConfig{MaxRunners: 1}, g)
 	ctx := context.Background()
 	r.s.Scale(ctx, stats(1))
 	name := r.b.names()[0]
-	g.err["app"] = errors.New("github down")
-	r.s.Scale(ctx, &scaleset.RunnerScaleSetMessage{
+	msg := &scaleset.RunnerScaleSetMessage{
 		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: name, JobMessageBase: scaleset.JobMessageBase{OwnerName: "o", RepositoryName: "app"}}},
-		Statistics:         &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 0},
-	})
-	eventually(t, "runner stopped (fail closed)", func() bool { return r.b.stops(name) > 0 })
+		Statistics:         &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	}
+	g.err["app"] = errors.New("github down")
+	if err := r.s.Scale(ctx, msg); err == nil {
+		t.Fatal("an unfinished re-check must fail the message so it is repeated")
+	}
+	time.Sleep(30 * time.Millisecond)
+	if r.b.stops(name) != 0 {
+		t.Fatal("a job that was verified at acquisition must not be killed by an API outage")
+	}
+	if _, busy := r.s.Count(); busy != 1 {
+		t.Fatal("the runner must still be marked busy")
+	}
+	// GitHub is back and now says no: the redelivered message stops the runner.
+	delete(g.err, "app")
+	g.deny["app"] = "public repository"
+	if err := r.s.Scale(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "refused job stopped", func() bool { return r.b.stops(name) > 0 })
 	r.s.Close(ctx)
+}
+
+func TestGuardDeadlineStopsNoRunningJobAndMakesProgress(t *testing.T) {
+	old := guardPhaseTimeout
+	guardPhaseTimeout = 50 * time.Millisecond
+	defer func() { guardPhaseTimeout = old }()
+	g := &slowGuard{delay: 20 * time.Millisecond}
+	r := newRig(pool.New(6, 0, nil), config.ScaleSetConfig{MaxRunners: 6}, g)
+	ctx := context.Background()
+	r.s.Scale(ctx, stats(6))
+	names := r.b.names()
+	msg := &scaleset.RunnerScaleSetMessage{
+		Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 7},
+		JobAvailableMessages: []*scaleset.JobAvailable{
+			{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 99, WorkflowRunID: 99, OwnerName: "o", RepositoryName: "app"}},
+		},
+	}
+	for _, n := range names {
+		msg.JobStartedMessages = append(msg.JobStartedMessages,
+			&scaleset.JobStarted{RunnerName: n, JobMessageBase: scaleset.JobMessageBase{OwnerName: "o", RepositoryName: "app"}})
+	}
+	if err := r.s.Scale(ctx, msg); err == nil {
+		t.Fatal("re-checks cut short by the deadline must fail the message")
+	}
+	// Each redelivery skips what already passed, so it finishes.
+	delivered := false
+	for i := 0; i < 10 && !delivered; i++ {
+		delivered = r.s.Scale(ctx, msg) == nil
+	}
+	if !delivered {
+		t.Fatal("redeliveries must make progress (no livelock)")
+	}
+	for _, n := range names {
+		if r.b.stops(n) != 0 {
+			t.Fatalf("runner %s was stopped although its job was never refused", n)
+		}
+	}
+	if len(r.acq.got) != 1 || fmt.Sprint(r.acq.got[0]) != "[99]" {
+		t.Fatalf("the available job must be acquired once: %v", r.acq.got)
+	}
+	r.s.Close(ctx)
+}
+
+func TestOnlyConfirmedAcquisitionsAreRemembered(t *testing.T) {
+	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, nil)
+	r.acq.only = map[int64]bool{1: true} // GitHub confirms only request 1
+	msg := &scaleset.RunnerScaleSetMessage{JobAvailableMessages: []*scaleset.JobAvailable{
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 1, WorkflowRunID: 1, OwnerName: "o", RepositoryName: "app"}},
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 2, WorkflowRunID: 2, OwnerName: "o", RepositoryName: "app"}},
+	}}
+	ctx := context.Background()
+	r.s.Scale(ctx, msg)
+	r.s.Scale(ctx, msg) // offered again
+	if len(r.acq.got) != 2 || fmt.Sprint(r.acq.got[0]) != "[1 2]" || fmt.Sprint(r.acq.got[1]) != "[2]" {
+		t.Fatalf("an unconfirmed id must be tried again, a confirmed one not: %v", r.acq.got)
+	}
 }
 
 func TestDrainingAcquiresAndStartsNothing(t *testing.T) {

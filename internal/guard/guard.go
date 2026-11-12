@@ -84,7 +84,8 @@ func (g *Guard) CheckTarget(ctx context.Context, owner, repo, group string) erro
 // a definite refusal (public repo, repo off the allow list, a run whose head
 // is another repository, i.e. a fork). err != nil means GitHub could not be
 // asked (network, 5xx, rate limit); the job must not run, and the caller
-// retries later. A 401/403/404 answer is a refusal, not an error.
+// retries later. A 404, or a 403 that is not a rate limit, is a refusal; a 401
+// (broken credential) is an error.
 //
 // The decision never depends on the event name in the message: the workflow
 // run is always fetched and its head repository compared with the repository.

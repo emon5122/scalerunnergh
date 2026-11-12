@@ -67,6 +67,7 @@ type runnerState struct {
 	slot     *pool.Slot
 	busy     bool
 	busyCh   chan struct{} // closed when the runner takes a job
+	verified bool          // its running job passed the second guard check
 	started  time.Time
 	stopping bool
 }
@@ -181,8 +182,11 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 	// One deadline for every guard check of this message.
 	gctx, cancel := context.WithTimeout(ctx, guardPhaseTimeout)
 	defer cancel()
+	var deferred error
 	for _, j := range msg.JobStartedMessages {
-		s.jobStarted(ctx, gctx, j)
+		if err := s.jobStarted(gctx, j); err != nil && deferred == nil {
+			deferred = err
+		}
 	}
 	for _, j := range msg.JobCompletedMessages {
 		s.o.Logger.Info("job completed", "runner", j.RunnerName, "result", j.Result,
@@ -195,7 +199,6 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		s.o.Metrics.Set(metrics.JobsAssigned, s.o.ScaleSet.Name, float64(msg.Statistics.TotalAssignedJobs))
 	}
 
-	var deferred error
 	if len(msg.JobAvailableMessages) > 0 {
 		ids := make([]int64, 0, len(msg.JobAvailableMessages))
 		for _, j := range msg.JobAvailableMessages {
@@ -262,34 +265,45 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 	return deferred
 }
 
-// jobStarted marks the runner busy and re-checks the job: a job the guard
-// would refuse must not keep running here.
-func (s *Scaler) jobStarted(ctx, gctx context.Context, j *scaleset.JobStarted) {
+// jobStarted marks the runner busy and takes a second look at its job.
+//
+// The job was already verified before it was acquired, so the runner is
+// stopped only on a definite refusal. If GitHub cannot be asked (or the
+// message's guard deadline has passed), the runner keeps running and the
+// error is returned, so the message comes again and the check is repeated.
+func (s *Scaler) jobStarted(gctx context.Context, j *scaleset.JobStarted) error {
 	s.mu.Lock()
 	r := s.runners[j.RunnerName]
 	if r != nil && !r.busy {
 		r.busy = true
 		close(r.busyCh)
 	}
+	verified := r != nil && r.verified
 	s.mu.Unlock()
+	if r == nil || verified {
+		return nil // not ours, or already checked on an earlier delivery
+	}
 	s.o.Logger.Info("job started", "runner", j.RunnerName,
 		"repo", j.OwnerName+"/"+j.RepositoryName, "job", j.JobDisplayName, "event", j.EventName)
-	if r == nil {
-		return
+	if gctx.Err() != nil {
+		return fmt.Errorf("guard re-check of %s: %w", j.RunnerName, gctx.Err())
 	}
 	ok, reason, err := s.allowJob(gctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
-	if ctx.Err() != nil {
-		return // shutting down: Close stops every runner anyway
-	}
 	if err != nil {
-		ok, reason = false, "cannot verify the running job: "+err.Error() // fail closed, after retries
+		s.o.Logger.Warn("running job could not be re-checked yet; runner kept", "runner", j.RunnerName, "error", err)
+		return fmt.Errorf("guard re-check of %s: %w", j.RunnerName, err)
 	}
 	if !ok {
 		s.o.Metrics.Add(metrics.JobsRefused, s.o.ScaleSet.Name, 1)
 		s.o.Logger.Error("stopping runner: job refused by guard", "reason", reason, "runner", j.RunnerName,
 			"repo", j.OwnerName+"/"+j.RepositoryName, "event", j.EventName)
-		s.stopRunner(ctx, j.RunnerName, "guard")
+		s.stopRunner(context.WithoutCancel(gctx), j.RunnerName, "guard")
+		return nil
 	}
+	s.mu.Lock()
+	r.verified = true
+	s.mu.Unlock()
+	return nil
 }
 
 // Reconcile starts runners up to the demand and the host capacity, removes

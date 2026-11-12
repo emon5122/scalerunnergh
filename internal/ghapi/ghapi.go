@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -116,13 +117,13 @@ func IsNotFound(err error) bool {
 }
 
 // IsDenied reports whether err is a definite "this credential may not read
-// that" (401, or a 403 that is not a rate limit). Retrying cannot help.
+// that": a 403 that is not a rate limit. Retrying cannot help.
+//
+// A 401 is not a denial: it says the credential itself is broken (expired
+// PAT), nothing about the resource, so it stays a retryable error.
 func IsDenied(err error) bool {
 	var se *StatusError
-	if !errors.As(err, &se) || se.RateLimited {
-		return false
-	}
-	return se.Status == http.StatusUnauthorized || se.Status == http.StatusForbidden
+	return errors.As(err, &se) && se.Status == http.StatusForbidden && !se.RateLimited
 }
 
 // Client calls the REST API.
@@ -209,10 +210,15 @@ func (c *Client) get(ctx context.Context, path string, dest any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		// The body is only inspected for the rate-limit wording (a secondary
+		// limit can come as a bare 403); it is never put into the error.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		io.Copy(io.Discard, resp.Body)
+		msg := strings.ToLower(string(body))
 		limited := resp.StatusCode == http.StatusTooManyRequests ||
 			(resp.StatusCode == http.StatusForbidden &&
-				(resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-RateLimit-Remaining") == "0"))
+				(resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-RateLimit-Remaining") == "0" ||
+					strings.Contains(msg, "rate limit") || strings.Contains(msg, "abuse")))
 		return &StatusError{Path: path, Status: resp.StatusCode, RateLimited: limited}
 	}
 	return json.NewDecoder(resp.Body).Decode(dest)

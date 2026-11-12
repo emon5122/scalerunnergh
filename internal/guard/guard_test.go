@@ -43,6 +43,8 @@ func (f *fakeAPI) GetRun(_ context.Context, _, _ string, id int64) (*ghapi.Run, 
 		return nil, &ghapi.StatusError{Path: "/runs", Status: 403, RateLimited: true}
 	case 502:
 		return nil, &ghapi.StatusError{Path: "/runs", Status: 502}
+	case 401:
+		return nil, &ghapi.StatusError{Path: "/runs", Status: 401}
 	}
 	f.mu.Lock()
 	r, ok := f.runs[id]
@@ -93,6 +95,7 @@ func TestAllowJob(t *testing.T) {
 		{"run not readable (403) is a refusal", "app", 403, false, false, "not readable"},
 		{"rate limit (403) is an error to retry", "app", 429, false, true, "cannot verify workflow run"},
 		{"server error is an error to retry", "app", 502, false, true, "cannot verify workflow run"},
+		{"broken credential (401) is an error to retry", "app", 401, false, true, "cannot verify workflow run"},
 		{"no run id", "app", 0, false, false, "no workflow run id"},
 		{"repo gone (404) is a refusal, not a retry", "ghost", 1, false, false, "repository not found"},
 		{"no repo", "", 1, false, false, "no repository"},
