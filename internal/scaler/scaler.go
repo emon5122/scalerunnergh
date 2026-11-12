@@ -70,6 +70,9 @@ type runnerState struct {
 	verified bool          // its running job passed the second guard check
 	started  time.Time
 	stopping bool
+	// completed: GitHub's JobCompleted for this runner was handled, so the
+	// statistics no longer count its job.
+	completed bool
 }
 
 // Scaler implements listener.Scaler for one scale set.
@@ -191,6 +194,13 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 	for _, j := range msg.JobCompletedMessages {
 		s.o.Logger.Info("job completed", "runner", j.RunnerName, "result", j.Result,
 			"repo", j.OwnerName+"/"+j.RepositoryName, "job", j.JobDisplayName)
+		s.mu.Lock()
+		if r := s.runners[j.RunnerName]; r != nil {
+			// The statistics GitHub sends with a JobCompleted already exclude
+			// that job (seen live); watch() then does not subtract it again.
+			r.completed = true
+		}
+		s.mu.Unlock()
 	}
 	if msg.Statistics != nil {
 		s.mu.Lock()
@@ -460,11 +470,13 @@ func (s *Scaler) watch(r *runnerState) {
 	delete(s.runners, r.name)
 	forced := r.stopping || timedOut
 	wasBusy := r.busy
-	if (wasBusy || (err == nil && code == 0)) && s.assigned > 0 {
+	if (wasBusy || (err == nil && code == 0)) && !r.completed && s.assigned > 0 {
 		// An ephemeral runner exits after its one job, so that job is no
 		// longer assigned. GitHub's next statistics correct the number; until
 		// then this keeps a spare runner from being started for a job that is
-		// already done.
+		// already done. If GitHub already reported the job completed, its
+		// statistics no longer count it (and may count the next job of the
+		// workflow): subtracting again would leave that job waiting.
 		s.assigned--
 	}
 	if !wasBusy && !forced && (code != 0 || err != nil) && time.Since(r.started) < quickExit {

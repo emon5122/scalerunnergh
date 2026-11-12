@@ -381,6 +381,35 @@ func TestNoSpareRunnerAfterAJobFinishes(t *testing.T) {
 	r.s.Close(ctx)
 }
 
+// The live case on the office PC: GitHub's JobCompleted message (with fresh
+// statistics that already count the next job of the workflow, a `needs:`
+// dependency) arrives before the finished runner's process has exited. The exit
+// must not subtract that job again, or the next job waits for GitHub's next
+// message (about 5 minutes).
+func TestNextJobStartsWhenCompletionArrivesBeforeRunnerExit(t *testing.T) {
+	r := newRig(pool.New(2, 0, nil), config.ScaleSetConfig{MaxRunners: 2}, nil)
+	ctx := context.Background()
+	r.s.Scale(ctx, stats(1))
+	name := r.b.names()[0]
+	base := scaleset.JobMessageBase{OwnerName: "o", RepositoryName: "app"}
+	r.s.Scale(ctx, &scaleset.RunnerScaleSetMessage{
+		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: name, JobMessageBase: base}},
+		Statistics:         &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	})
+	// Job 1 is done and job 2 (needs: job 1) is assigned, while runner 1 still runs.
+	r.s.Scale(ctx, &scaleset.RunnerScaleSetMessage{
+		JobCompletedMessages: []*scaleset.JobCompleted{{RunnerName: name, Result: "succeeded", JobMessageBase: base}},
+		Statistics:           &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	})
+	r.b.finish(name, 0)
+	eventually(t, "a runner for the next job", func() bool {
+		r.b.mu.Lock()
+		defer r.b.mu.Unlock()
+		return len(r.b.started) == 2
+	})
+	r.s.Close(ctx)
+}
+
 func TestStopIdleKeepsBusyRunners(t *testing.T) {
 	r := newRig(pool.New(3, 0, nil), config.ScaleSetConfig{MaxRunners: 3}, nil)
 	ctx := context.Background()
