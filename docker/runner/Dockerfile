@@ -24,7 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-# No sudo on purpose: the toolchain comes from the image, not from the job.
+# No root for jobs: the toolchain comes from the image, not from the job (the rust
+# flavor adds a sudo shim that grants nothing, see srg-sudo).
 RUN useradd -m -s /bin/bash -u 1001 runner && usermod -aG docker runner
 
 WORKDIR /home/runner
@@ -158,7 +159,7 @@ ARG AWSCLI_SHA256_AMD64=fddb097a8ea197dc9beed9e4426ef99aded612a52df64581e079b6e8
 # renovate: datasource=github-releases depName=AppImage/appimagetool
 ARG APPIMAGETOOL_VERSION=1.9.1
 ARG APPIMAGETOOL_SHA256_AMD64=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
-# mc has no binary downloads any more: built from the tagged module (go.sum checked).
+# mc has no binary downloads any more: built from the tagged module (verified by the Go checksum database).
 # renovate: datasource=github-tags depName=minio/mc
 ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
 # renovate: datasource=rubygems depName=fpm

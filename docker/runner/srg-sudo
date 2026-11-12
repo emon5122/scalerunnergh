@@ -10,10 +10,26 @@
 # removing preinstalled SDKs do what an unprivileged user may do).
 set -uo pipefail
 args=("$@")
-# drop sudo's own options (-E, -H, -n, -u root ...)
+# sudo's own options. Only root (the shim's stand-in) or the job user itself
+# may be the target: running "as postgres" silently as runner would mislead.
 while [ "${#args[@]}" -gt 0 ]; do
     case "${args[0]}" in
-        -u | -g) args=("${args[@]:2}") ;;
+        -u | -g | --user | --group)
+            t="${args[1]:-}"
+            args=("${args[@]:2}")
+            if [ -n "$t" ] && [ "$t" != root ] && [ "$t" != "$(id -un)" ] && [ "$t" != 0 ]; then
+                echo "srg-sudo: cannot run as '$t' (no other users in scalerunnergh jobs)" >&2
+                exit 1
+            fi
+            ;;
+        --user=* | -u?*)
+            t="${args[0]#--user=}"; t="${t#-u}"
+            if [ "$t" != root ] && [ "$t" != "$(id -un)" ] && [ "$t" != 0 ]; then
+                echo "srg-sudo: cannot run as '$t' (no other users in scalerunnergh jobs)" >&2
+                exit 1
+            fi
+            args=("${args[@]:1}")
+            ;;
         --) args=("${args[@]:1}"); break ;;
         -*) args=("${args[@]:1}") ;;
         *) break ;;
@@ -27,27 +43,47 @@ while [ "${#args[@]}" -gt 0 ] && [[ "${args[0]}" == *=* ]]; do
 done
 [ "${#args[@]}" -gt 0 ] || exit 0
 cmd="${args[0]##*/}"
+warn() { echo "::warning::srg-sudo: $*"; echo "srg-sudo: $*" >&2; }
 if [ "$cmd" = apt-get ] || [ "$cmd" = apt ]; then
     sub=""
     pkgs=()
-    for a in "${args[@]:1}"; do
+    only_upgrade=""
+    rest=("${args[@]:1}")
+    i=0
+    while [ "$i" -lt "${#rest[@]}" ]; do
+        a="${rest[$i]}"
         case "$a" in
+            -o | -t | -c | -a | --option | --target-release | --default-release | --config-file | --host-architecture)
+                i=$((i + 1)) ;; # value-taking flag: skip its value
+            --only-upgrade) only_upgrade=1 ;;
             -*) ;;
-            *) if [ -z "$sub" ]; then sub="$a"; else pkgs+=("${a%%=*}"); fi ;;
+            *) if [ -z "$sub" ]; then sub="$a"; else pkgs+=("$a"); fi ;;
         esac
+        i=$((i + 1))
     done
     case "$sub" in
-        update | upgrade | dist-upgrade | clean | autoclean | autoremove | remove | purge)
+        update | clean | autoclean)
             echo "srg-sudo: '$cmd $sub' skipped (no root in scalerunnergh jobs)"
             exit 0
             ;;
+        upgrade | dist-upgrade | full-upgrade | autoremove | remove | purge)
+            warn "'$cmd $sub ${pkgs[*]}' NOT done: jobs have no root; the image is fixed (scalerunnergh docker/runner/Dockerfile)"
+            exit 0
+            ;;
         install)
+            [ -z "$only_upgrade" ] || warn "'--only-upgrade' NOT done: the image's versions are used"
             missing=()
             for p in "${pkgs[@]}"; do
-                case "$p" in
+                name="${p%%=*}"
+                case "$name" in
                     awscli) command -v aws >/dev/null && continue ;; # AWS CLI v2, not a dpkg package
                 esac
-                dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
+                if ! dpkg -s "$name" >/dev/null 2>&1; then
+                    missing+=("$p")
+                elif [ "$p" != "$name" ]; then
+                    have="$(dpkg-query -W -f='${Version}' "$name" 2>/dev/null)"
+                    [ "$have" = "${p#*=}" ] || missing+=("$p (image has $have)")
+                fi
             done
             if [ "${#missing[@]}" -gt 0 ]; then
                 echo "srg-sudo: not in the runner image: ${missing[*]} (add them to scalerunnergh docker/runner/Dockerfile)" >&2
@@ -60,9 +96,16 @@ if [ "$cmd" = apt-get ] || [ "$cmd" = apt ]; then
 fi
 if [ "$cmd" = gem ] && [ "${args[1]:-}" = install ]; then
     missing=()
-    for a in "${args[@]:2}"; do
-        case "$a" in -* | [0-9]*) continue ;; esac # flags and version values
-        gem list -i "^${a}$" >/dev/null 2>&1 || missing+=("$a")
+    rest=("${args[@]:2}")
+    i=0
+    while [ "$i" -lt "${#rest[@]}" ]; do
+        a="${rest[$i]}"
+        case "$a" in
+            -v | --version | -s | --source | --source=* | -i | --install-dir | -n | --bindir) [[ "$a" == *=* ]] || i=$((i + 1)) ;;
+            -*) ;;
+            *) g="${a%%:*}"; gem list -i "^${g}$" >/dev/null 2>&1 || missing+=("$g") ;;
+        esac
+        i=$((i + 1))
     done
     if [ "${#missing[@]}" -gt 0 ]; then
         echo "srg-sudo: gems not in the runner image: ${missing[*]}" >&2

@@ -170,11 +170,12 @@ One JSON file per host. Unknown fields are errors. Validate with
   read whatever that account can, including the credential file and the unpacked runner
   release. Use native mode only for repos you fully trust, under a dedicated unprivileged
   account, with a credential scoped to that one org. On Windows, `native.run_as` runs the
-  jobs under a service account with a restricted token (all privileges but
-  SeChangeNotify removed, so no SeImpersonate route to SYSTEM) and resets `native.root`
-  to SYSTEM and Administrators only, so a credential readable by SYSTEM and
-  Administrators only is out of a job's reach. Residual risk: a hostile job that leaves a
-  process outside the job's Job Object could race the job-dir deletion.
+  jobs under a service account with a restricted token (only SeChangeNotify) and resets
+  `native.root` to SYSTEM and Administrators only, so a job cannot simply read a credential
+  that only SYSTEM and Administrators may read. This is defence in depth, not a boundary
+  against hostile code: a determined job can regain the service account's privileges
+  (for example through the Task Scheduler) and escalate from there, and it could race the
+  job-dir deletion. Run only repositories you trust.
 - **`pull_request_target`, `workflow_run`, `issue_comment`** run the base repository's
   workflow, so the guard treats them as runs of the repository itself. Do not check out and
   run fork code in such workflows.
@@ -206,9 +207,12 @@ rm /srv/scalerunnergh/control/STOP      # resume
 | `python` | base + Python 3, uv |
 | `media` | node + ffmpeg, sox |
 | `full` | node + Go + Python + ffmpeg |
-| `rust` | full + rustup (toolchain from the repo's `rust-toolchain.toml`), clang/lld 21, cmake, glib headers, sqlite3, shellcheck, Tauri v2 Linux build libraries (webkit2gtk 4.1, libsoup 3, appindicator, rsvg, udev, patchelf) |
+| `rust` | full + rustup (toolchain from the repo's `rust-toolchain.toml`), clang/lld 21, cmake, glib headers, sqlite3, shellcheck, Tauri v2 Linux build libraries (webkit2gtk 4.1, libsoup 3, appindicator, rsvg, udev, patchelf), aws cli v2, mc, appimagetool, fpm, rpm, imagemagick, webp, maven, libpq-dev, the no-root `sudo` shim |
 
-There is no `sudo` in the images: tools come from the image, pinned in the Dockerfile.
+Jobs never get root: tools come from the image, pinned in the Dockerfile. In the `rust`
+flavor `sudo` is a shim that grants nothing: `sudo apt-get install X` passes only when X is
+already in the image, apt maintenance commands are skipped (removals and upgrades with a
+warning), and anything else runs as the job user.
 The images only start through ScaleRunnerGH (the entrypoint needs the JIT config file).
 
 ## Metrics

@@ -362,6 +362,9 @@ func (c *Config) Validate() error {
 			if !windowsAbs(c.Native.Root) {
 				return errors.New("config: native.run_as needs an absolute Windows native.root (C:\\...)")
 			}
+			if err := runAsRootAllowed(c.Native.Root); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -466,4 +469,22 @@ func SanitizeName(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// runAsRootAllowed refuses roots whose ACL must never be reset to
+// SYSTEM+Administrators only (native.run_as does that): a volume root, a
+// top-level directory (C:\Windows, C:\Users, C:\ProgramData ...) or anything
+// under Windows, Users or Program Files. A dedicated directory such as
+// C:\ProgramData\scalerunnergh\work is expected.
+func runAsRootAllowed(root string) error {
+	r := strings.ToLower(strings.TrimRight(strings.ReplaceAll(root, "/", `\`), `\`))
+	parts := strings.Split(r, `\`)
+	if len(parts) < 3 {
+		return fmt.Errorf("config: native.run_as: native.root %q is too high up; use a dedicated directory such as C:\\ProgramData\\scalerunnergh\\work", root)
+	}
+	switch parts[1] {
+	case "windows", "users", "program files", "program files (x86)":
+		return fmt.Errorf("config: native.run_as: native.root %q is inside a system directory", root)
+	}
+	return nil
 }

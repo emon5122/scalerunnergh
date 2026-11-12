@@ -4,6 +4,7 @@ package backend
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -135,10 +136,28 @@ func (ra *runAsAccount) grantJobsDir(dir string) error {
 	if err := icacls(root, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"); err != nil {
 		return err
 	}
+	// Explicit entries an earlier setup may have left on the root: the job
+	// account, Users, Authenticated Users, Everyone.
+	if err := icacls(root, "/remove:g", "*"+ra.sid, "*S-1-5-32-545", "*S-1-5-11", "*S-1-1-0"); err != nil {
+		return err
+	}
+	// Children with explicit entries of their own fall back to the root's ACL.
+	for _, sub := range []string{"dist", "logs"} {
+		if p := filepath.Join(root, sub); dirExists(p) {
+			if err := icacls(p, "/reset", "/T", "/C", "/Q"); err != nil {
+				return err
+			}
+		}
+	}
 	if err := icacls(root, "/grant", "*"+ra.sid+":(RX)"); err != nil {
 		return err
 	}
-	if err := icacls(dir, "/grant", "*"+ra.sid+":(OI)(CI)M"); err != nil {
+	// The jobs dir itself is read-only for the account (no deleting it or its
+	// siblings' parents); what is created inside it is the account's to modify.
+	if err := icacls(dir, "/remove:g", "*"+ra.sid); err != nil {
+		return err
+	}
+	if err := icacls(dir, "/grant", "*"+ra.sid+":(RX)", "*"+ra.sid+":(OI)(CI)(IO)M"); err != nil {
 		return err
 	}
 	for p := filepath.Dir(root); ; p = filepath.Dir(p) {
@@ -220,3 +239,8 @@ func (t procTree) close() {
 // killLeftover never kills by pid on Windows: the Job Object already ended
 // the tree when the earlier orchestrator process exited.
 func killLeftover(pid int, dir string) bool { return false }
+
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
