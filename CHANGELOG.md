@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/emon5122/scalerunnergh/compare/v1.0.0...v1.1.0) (2026-11-12)
+
+
+### Features
+
+* GitHub App manifests and key conversion script for org and user installs ([4feb4d4](https://github.com/emon5122/scalerunnergh/commit/4feb4d42c71aab6b213895a649e200603c996bc9))
+* **images:** rust runner flavor (rustup, clang/lld 21, cmake, glib, sqlite3, shellcheck) ([fe7e3f4](https://github.com/emon5122/scalerunnergh/commit/fe7e3f4066903f0c3146e984abc2510271101c93))
+
 ## 1.0.0 (2026-11-12)
 
 
