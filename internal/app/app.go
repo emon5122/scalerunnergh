@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -249,7 +250,8 @@ func (a *App) newService(ss config.ScaleSetConfig, b backend.Backend) (*service,
 	}
 	svc := &service{
 		app: a, ss: ss, owner: owner, repo: repo, client: client,
-		guard:  guard.New(&ghapi.Client{Tokens: tokens}, owner, ss.AllowRepos),
+		// A short HTTP timeout: guard checks run inside the listener loop.
+		guard:  guard.New(&ghapi.Client{Tokens: tokens, HTTP: &http.Client{Timeout: 10 * time.Second}}, owner, ss.AllowRepos),
 		logger: a.Logger.With("scale_set", ss.Name),
 	}
 	svc.scaler = scaler.New(scaler.Options{

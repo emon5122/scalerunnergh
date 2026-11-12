@@ -17,7 +17,7 @@ import (
 
 type entry struct {
 	name, body string
-	link       bool
+	link, dir  bool
 }
 
 func tgz(t *testing.T, entries []entry) []byte {
@@ -29,6 +29,10 @@ func tgz(t *testing.T, entries []entry) []byte {
 	for _, e := range entries {
 		if e.link {
 			tw.WriteHeader(&tar.Header{Name: e.name, Typeflag: tar.TypeSymlink, Linkname: e.body})
+			continue
+		}
+		if e.dir {
+			tw.WriteHeader(&tar.Header{Name: e.name, Typeflag: tar.TypeDir, Mode: 0o755})
 			continue
 		}
 		tw.WriteHeader(&tar.Header{Name: e.name, Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(e.body))})
@@ -98,12 +102,13 @@ func TestEnsureRejectsWrongSHA(t *testing.T) {
 
 func TestEnsureRejectsEscapes(t *testing.T) {
 	for name, entries := range map[string][]entry{
-		"dotdot":         {{name: "../evil", body: "x"}},
-		"abs symlink":    {{name: "l", body: "/etc/passwd", link: true}},
-		"link escapes":   {{name: "bin/l", body: "../../outside", link: true}},
-		"chained links":  {{name: "d/l", body: "..", link: true}, {name: "d/x", body: "l/..", link: true}, {name: "d/x/evil", body: "x"}},
-		"write via link": {{name: "l", body: "bin", link: true}, {name: "l", body: "overwrite"}},
-		"link via link":  {{name: "top/keep", body: "x"}, {name: "a/b/c", body: "../../top", link: true}, {name: "a/b/c/l", body: "../../../victim", link: true}},
+		"dotdot":          {{name: "../evil", body: "x"}},
+		"abs symlink":     {{name: "l", body: "/etc/passwd", link: true}},
+		"link escapes":    {{name: "bin/l", body: "../../outside", link: true}},
+		"chained links":   {{name: "d/l", body: "..", link: true}, {name: "d/x", body: "l/..", link: true}, {name: "d/x/evil", body: "x"}},
+		"write via link":  {{name: "l", body: "bin", link: true}, {name: "l", body: "overwrite"}},
+		"target via link": {{name: "d/l", body: "..", link: true}, {name: "d/x", body: "l/..", link: true}},
+		"link via link":   {{name: "top/keep", body: "x"}, {name: "a/b/c", body: "../../top", link: true}, {name: "a/b/c/l", body: "../../../victim", link: true}},
 	} {
 		b := tgz(t, entries)
 		url, _ := serve(t, b)
@@ -114,6 +119,24 @@ func TestEnsureRejectsEscapes(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, "dist", "evil")); err == nil {
 			t.Errorf("%s: file written outside the target", name)
 		}
+	}
+}
+
+// The real actions/runner tarball is packed from ".", so its entries are
+// "./", "./bin/", "./run.sh", with relative links inside externals/.
+func TestEnsureAcceptsDotRootLayout(t *testing.T) {
+	b := tgz(t, []entry{
+		{name: "./", dir: true}, {name: "./bin/", dir: true}, {name: "./run.sh", body: "#!/bin/sh\n"},
+		{name: "./externals/node20/bin/npm", body: "../lib/node_modules/npm/bin/npm-cli.js", link: true},
+		{name: "./externals/node20/lib/node_modules/npm/bin/npm-cli.js", body: "js"},
+	})
+	url, _ := serve(t, b)
+	dir, err := Ensure(context.Background(), t.TempDir(), "1", sum(b), url)
+	if err != nil {
+		t.Fatalf("the runner tarball layout must unpack: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "externals", "node20", "bin", "npm")); err != nil || string(got) != "js" {
+		t.Fatalf("link listed before its target must work: %q %v", got, err)
 	}
 }
 

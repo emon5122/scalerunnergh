@@ -473,6 +473,30 @@ func TestUnverifiableJobFailsTheMessageAfterHandlingTheRest(t *testing.T) {
 	r.s.Close(ctx)
 }
 
+func TestRedeliveredMessageIsNotAcquiredTwiceAndBrokenRunIsDropped(t *testing.T) {
+	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, fakeGuard{err: map[string]error{"flaky": errors.New("403")}})
+	msg := &scaleset.RunnerScaleSetMessage{JobAvailableMessages: []*scaleset.JobAvailable{
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 1, WorkflowRunID: 11, OwnerName: "o", RepositoryName: "flaky"}},
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 2, WorkflowRunID: 22, OwnerName: "o", RepositoryName: "app"}},
+	}}
+	ctx := context.Background()
+	for i := 1; i < maxUnverified; i++ {
+		if err := r.s.Scale(ctx, msg); err == nil {
+			t.Fatalf("delivery %d: the unverifiable run must still fail the message", i)
+		}
+	}
+	// The run that never verifies is refused for good, so the queue moves on.
+	if err := r.s.Scale(ctx, msg); err != nil {
+		t.Fatalf("after %d attempts the broken run must be dropped, got %v", maxUnverified, err)
+	}
+	if len(r.acq.got) != 1 || fmt.Sprint(r.acq.got[0]) != "[2]" {
+		t.Fatalf("the good job must be acquired exactly once across redeliveries: %v", r.acq.got)
+	}
+	if r.m.Get(metrics.JobsRefused, "set") != 1 {
+		t.Fatal("the dropped run must count as refused")
+	}
+}
+
 func TestGuardCheckIsRetriedBeforeGivingUp(t *testing.T) {
 	g := &flakyGuard{failures: 2}
 	r := newRig(pool.New(1, 0, nil), config.ScaleSetConfig{MaxRunners: 1}, g)

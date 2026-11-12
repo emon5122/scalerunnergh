@@ -85,7 +85,12 @@ type Scaler struct {
 	draining     bool
 	cooldown     time.Time // no starts before this (failed start, or a runner died at start)
 	startFails   int       // consecutive failed starts, for the backoff
-	wg           sync.WaitGroup
+	// acquired remembers recently acquired request ids, so a redelivered
+	// message does not acquire them twice; unverified counts how often a
+	// run could not be verified, so one broken run cannot block the rest.
+	acquired   map[int64]time.Time
+	unverified map[int64]int
+	wg         sync.WaitGroup
 }
 
 // quickExit is how soon after its start a runner that never took a job must
@@ -107,7 +112,7 @@ func New(o Options) *Scaler {
 		o.Metrics = metrics.New()
 	}
 	o.Logger = o.Logger.With("scale_set", o.ScaleSet.Name)
-	return &Scaler{o: o, runners: map[string]*runnerState{}}
+	return &Scaler{o: o, runners: map[string]*runnerState{}, acquired: map[int64]time.Time{}, unverified: map[int64]int{}}
 }
 
 // SetAcquirer sets the message session used to acquire jobs (it changes when
@@ -130,7 +135,20 @@ func (s *Scaler) SetScaleSetID(id int) {
 var (
 	guardRetries    = 3
 	guardRetryPause = 2 * time.Second
+	// guardPhaseTimeout bounds all guard checks of one message, so a
+	// black-holed API cannot stall the listener for long.
+	guardPhaseTimeout = 90 * time.Second
+	// maxUnverified: after this many failed verifications (each a session
+	// restart) a run is refused for good instead of blocking the queue.
+	maxUnverified = 3
 )
+
+// extendCooldown pushes the start pause out; it never shortens it. s.mu held.
+func (s *Scaler) extendCooldown(d time.Duration) {
+	if t := time.Now().Add(d); t.After(s.cooldown) {
+		s.cooldown = t
+	}
+}
 
 // allowJob asks the guard, retrying a few times while GitHub cannot be asked.
 func (s *Scaler) allowJob(ctx context.Context, owner, repo string, runID int64) (bool, string, error) {
@@ -181,9 +199,29 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 
 	var deferred error
 	if len(msg.JobAvailableMessages) > 0 {
+		gctx, cancel := context.WithTimeout(ctx, guardPhaseTimeout)
+		defer cancel()
 		ids := make([]int64, 0, len(msg.JobAvailableMessages))
 		for _, j := range msg.JobAvailableMessages {
-			ok, reason, err := s.allowJob(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
+			s.mu.Lock()
+			_, done := s.acquired[j.RunnerRequestID]
+			s.mu.Unlock()
+			if done {
+				continue // redelivered message: already acquired
+			}
+			ok, reason, err := s.allowJob(gctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
+			if err != nil {
+				s.mu.Lock()
+				s.unverified[j.WorkflowRunID]++
+				giveUp := s.unverified[j.WorkflowRunID] >= maxUnverified
+				if len(s.unverified) > 1000 {
+					clear(s.unverified)
+				}
+				s.mu.Unlock()
+				if giveUp {
+					ok, reason, err = false, "could not be verified after several attempts", nil
+				}
+			}
 			if err != nil {
 				// Not verifiable right now: never acquired.
 				s.o.Logger.Error("job could not be verified, not acquired", "error", err,
@@ -212,6 +250,17 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 				s.Reconcile(ctx)
 				return fmt.Errorf("acquire jobs: %w", err)
 			}
+			s.mu.Lock()
+			now := time.Now()
+			for id, at := range s.acquired {
+				if now.Sub(at) > time.Hour {
+					delete(s.acquired, id)
+				}
+			}
+			for _, id := range ids {
+				s.acquired[id] = now
+			}
+			s.mu.Unlock()
 		}
 	}
 	s.Reconcile(ctx)
@@ -233,7 +282,12 @@ func (s *Scaler) jobStarted(ctx context.Context, j *scaleset.JobStarted) {
 	if r == nil {
 		return
 	}
-	ok, reason, err := s.allowJob(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
+	gctx, cancel := context.WithTimeout(ctx, guardPhaseTimeout)
+	defer cancel()
+	ok, reason, err := s.allowJob(gctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
+	if ctx.Err() != nil {
+		return // shutting down: Close stops every runner anyway
+	}
 	if err != nil {
 		ok, reason = false, "cannot verify the running job: "+err.Error() // fail closed, after retries
 	}
@@ -302,7 +356,7 @@ func (s *Scaler) startOne(ctx context.Context, slot *pool.Slot) bool {
 		// reconciler, and a failing backend or API must not be hammered.
 		pause := min(startBackoff<<min(s.startFails, 10), maxStartBackoff)
 		s.startFails++
-		s.cooldown = time.Now().Add(pause)
+		s.extendCooldown(pause)
 		s.mu.Unlock()
 		slot.Release()
 		s.o.Metrics.Add(metrics.StartErrors, ss.Name, 1)
@@ -402,7 +456,7 @@ func (s *Scaler) watch(r *runnerState) {
 	if !wasBusy && !forced && (code != 0 || err != nil) && time.Since(r.started) < quickExit {
 		// Died right after start without taking a job (bad image, rejected
 		// runner version): do not spin, pause before the next start.
-		s.cooldown = time.Now().Add(startCooldown)
+		s.extendCooldown(startCooldown)
 		s.o.Logger.Error("runner exited right after start; pausing starts", "runner", r.name, "exit_code", code, "pause", startCooldown)
 	}
 	s.mu.Unlock()

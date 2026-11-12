@@ -144,6 +144,9 @@ func download(ctx context.Context, url, dest, wantSHA string) error {
 // their name and through symlinks already unpacked on the way to them.
 func safeJoin(dest, name string) (string, error) {
 	p := filepath.Join(dest, filepath.FromSlash(name))
+	if p == filepath.Clean(dest) {
+		return p, nil // the archive's own root entry ("./")
+	}
 	if !within(dest, p) {
 		return "", fmt.Errorf("archive entry %q escapes the target dir", name)
 	}
@@ -191,8 +194,30 @@ func safeLink(dest, p, name, linkname string) error {
 	if err != nil {
 		return err
 	}
-	if !within(realDest, realParent) || !within(realDest, filepath.Join(realParent, filepath.FromSlash(linkname))) {
+	if !within(realDest, realParent) {
 		return fmt.Errorf("archive symlink %q points outside the target dir", name)
+	}
+	// Walk the target one component at a time from the real parent, following
+	// links unpacked earlier. A lexical clean would hide "link/.." tricks.
+	cur := realParent
+	for _, comp := range strings.Split(filepath.ToSlash(linkname), "/") {
+		switch comp {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+		default:
+			next := filepath.Join(cur, comp)
+			if real, err := filepath.EvalSymlinks(next); err == nil {
+				next = real
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			cur = next
+		}
+		if !within(realDest, cur) {
+			return fmt.Errorf("archive symlink %q points outside the target dir", name)
+		}
 	}
 	return nil
 }

@@ -27,6 +27,8 @@ type Guard struct {
 	allowRepos map[string]bool // lower-case "owner/repo"; empty = any private repo
 	ttl        time.Duration
 	now        func() time.Time
+	// notFoundRetry is the pause before a missing workflow run is asked for again.
+	notFoundRetry time.Duration
 
 	mu    sync.Mutex
 	repos map[string]repoEntry
@@ -46,7 +48,7 @@ func New(api API, owner string, allowRepos []string) *Guard {
 		}
 		allow[strings.ToLower(r)] = true
 	}
-	return &Guard{api: api, allowRepos: allow, ttl: 10 * time.Minute, now: time.Now, repos: map[string]repoEntry{}}
+	return &Guard{api: api, allowRepos: allow, ttl: 10 * time.Minute, now: time.Now, notFoundRetry: 2 * time.Second, repos: map[string]repoEntry{}}
 }
 
 // CheckTarget verifies where the scale set registers: an org runner group
@@ -108,6 +110,15 @@ func (g *Guard) AllowJob(ctx context.Context, owner, repo string, runID int64) (
 		return false, "public repository", nil
 	}
 	run, err := g.api.GetRun(ctx, owner, repo, runID)
+	if ghapi.IsNotFound(err) {
+		// A run created a moment ago can be missing briefly: one retry.
+		select {
+		case <-ctx.Done():
+			return false, "cannot verify workflow run", fmt.Errorf("guard: %w", ctx.Err())
+		case <-time.After(g.notFoundRetry):
+		}
+		run, err = g.api.GetRun(ctx, owner, repo, runID)
+	}
 	if ghapi.IsNotFound(err) {
 		return false, "workflow run not found", nil
 	}

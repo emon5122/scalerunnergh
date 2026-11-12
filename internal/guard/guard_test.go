@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/emon5122/scalerunnergh/internal/ghapi"
 )
 
 type fakeAPI struct {
+	mu       sync.Mutex
 	repos    map[string]*ghapi.Repo
 	runs     map[int64]*ghapi.Run
 	groups   []ghapi.RunnerGroup
@@ -33,7 +36,9 @@ func (f *fakeAPI) GetRun(_ context.Context, _, _ string, id int64) (*ghapi.Run, 
 	if f.err != nil {
 		return nil, f.err
 	}
+	f.mu.Lock()
 	r, ok := f.runs[id]
+	f.mu.Unlock()
 	if !ok {
 		return nil, &ghapi.StatusError{Path: "/runs", Status: 404}
 	}
@@ -83,10 +88,26 @@ func TestAllowJob(t *testing.T) {
 	}
 	for _, c := range cases {
 		g := New(newFake(), "org", nil)
+		g.notFoundRetry = time.Millisecond
 		ok, reason, err := g.AllowJob(context.Background(), "org", c.repo, c.run)
 		if ok != c.ok || (err != nil) != c.isErr || !strings.Contains(reason, c.reason) {
 			t.Errorf("%s: got ok=%v reason=%q err=%v", c.name, ok, reason, err)
 		}
+	}
+}
+
+func TestRunMissingBrieflyIsRetriedOnce(t *testing.T) {
+	api := newFake()
+	g := New(api, "org", nil)
+	g.notFoundRetry = 20 * time.Millisecond
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		api.mu.Lock()
+		api.runs[50] = api.runs[1]
+		api.mu.Unlock()
+	}()
+	if ok, reason, err := g.AllowJob(context.Background(), "org", "app", 50); !ok || err != nil {
+		t.Fatalf("a run that appears a moment later must pass: %v %q %v", ok, reason, err)
 	}
 }
 
