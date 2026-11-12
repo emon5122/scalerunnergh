@@ -86,11 +86,9 @@ type Scaler struct {
 	cooldown     time.Time // no starts before this (failed start, or a runner died at start)
 	startFails   int       // consecutive failed starts, for the backoff
 	// acquired remembers recently acquired request ids, so a redelivered
-	// message does not acquire them twice; unverified counts how often a
-	// run could not be verified, so one broken run cannot block the rest.
-	acquired   map[int64]time.Time
-	unverified map[int64]int
-	wg         sync.WaitGroup
+	// message does not acquire them twice.
+	acquired map[int64]time.Time
+	wg       sync.WaitGroup
 }
 
 // quickExit is how soon after its start a runner that never took a job must
@@ -112,7 +110,7 @@ func New(o Options) *Scaler {
 		o.Metrics = metrics.New()
 	}
 	o.Logger = o.Logger.With("scale_set", o.ScaleSet.Name)
-	return &Scaler{o: o, runners: map[string]*runnerState{}, acquired: map[int64]time.Time{}, unverified: map[int64]int{}}
+	return &Scaler{o: o, runners: map[string]*runnerState{}, acquired: map[int64]time.Time{}}
 }
 
 // SetAcquirer sets the message session used to acquire jobs (it changes when
@@ -138,9 +136,6 @@ var (
 	// guardPhaseTimeout bounds all guard checks of one message, so a
 	// black-holed API cannot stall the listener for long.
 	guardPhaseTimeout = 90 * time.Second
-	// maxUnverified: after this many failed verifications (each a session
-	// restart) a run is refused for good instead of blocking the queue.
-	maxUnverified = 3
 )
 
 // extendCooldown pushes the start pause out; it never shortens it. s.mu held.
@@ -183,8 +178,11 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		s.Reconcile(ctx)
 		return nil
 	}
+	// One deadline for every guard check of this message.
+	gctx, cancel := context.WithTimeout(ctx, guardPhaseTimeout)
+	defer cancel()
 	for _, j := range msg.JobStartedMessages {
-		s.jobStarted(ctx, j)
+		s.jobStarted(ctx, gctx, j)
 	}
 	for _, j := range msg.JobCompletedMessages {
 		s.o.Logger.Info("job completed", "runner", j.RunnerName, "result", j.Result,
@@ -199,8 +197,6 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 
 	var deferred error
 	if len(msg.JobAvailableMessages) > 0 {
-		gctx, cancel := context.WithTimeout(ctx, guardPhaseTimeout)
-		defer cancel()
 		ids := make([]int64, 0, len(msg.JobAvailableMessages))
 		for _, j := range msg.JobAvailableMessages {
 			s.mu.Lock()
@@ -209,21 +205,19 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 			if done {
 				continue // redelivered message: already acquired
 			}
+			if gctx.Err() != nil {
+				// Out of time for this message: the rest was not checked and
+				// is offered again; nothing is refused unchecked.
+				if deferred == nil {
+					deferred = fmt.Errorf("guard checks: %w", gctx.Err())
+				}
+				continue
+			}
 			ok, reason, err := s.allowJob(gctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
 			if err != nil {
-				s.mu.Lock()
-				s.unverified[j.WorkflowRunID]++
-				giveUp := s.unverified[j.WorkflowRunID] >= maxUnverified
-				if len(s.unverified) > 1000 {
-					clear(s.unverified)
-				}
-				s.mu.Unlock()
-				if giveUp {
-					ok, reason, err = false, "could not be verified after several attempts", nil
-				}
-			}
-			if err != nil {
-				// Not verifiable right now: never acquired.
+				// Not verifiable right now (network, 5xx, rate limit): never
+				// acquired, retried until GitHub answers. A definite denial
+				// is a refusal from the guard, not an error.
 				s.o.Logger.Error("job could not be verified, not acquired", "error", err,
 					"repo", j.OwnerName+"/"+j.RepositoryName, "run_id", j.WorkflowRunID)
 				if deferred == nil {
@@ -246,7 +240,8 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		}
 		s.mu.Unlock()
 		if len(ids) > 0 && acq != nil {
-			if _, err := acq.AcquireJobs(ctx, ids); err != nil {
+			got, err := acq.AcquireJobs(ctx, ids)
+			if err != nil {
 				s.Reconcile(ctx)
 				return fmt.Errorf("acquire jobs: %w", err)
 			}
@@ -257,7 +252,7 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 					delete(s.acquired, id)
 				}
 			}
-			for _, id := range ids {
+			for _, id := range got { // only what GitHub confirmed
 				s.acquired[id] = now
 			}
 			s.mu.Unlock()
@@ -269,7 +264,7 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 
 // jobStarted marks the runner busy and re-checks the job: a job the guard
 // would refuse must not keep running here.
-func (s *Scaler) jobStarted(ctx context.Context, j *scaleset.JobStarted) {
+func (s *Scaler) jobStarted(ctx, gctx context.Context, j *scaleset.JobStarted) {
 	s.mu.Lock()
 	r := s.runners[j.RunnerName]
 	if r != nil && !r.busy {
@@ -282,8 +277,6 @@ func (s *Scaler) jobStarted(ctx context.Context, j *scaleset.JobStarted) {
 	if r == nil {
 		return
 	}
-	gctx, cancel := context.WithTimeout(ctx, guardPhaseTimeout)
-	defer cancel()
 	ok, reason, err := s.allowJob(gctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
 	if ctx.Err() != nil {
 		return // shutting down: Close stops every runner anyway

@@ -197,6 +197,10 @@ func (a *App) Status() Status {
 	return st
 }
 
+// guardHTTP has a short timeout: guard checks (and App token refreshes for
+// them) run inside the listener loop.
+var guardHTTP = &http.Client{Timeout: 10 * time.Second}
+
 type service struct {
 	app    *App
 	ss     config.ScaleSetConfig
@@ -234,7 +238,7 @@ func (a *App) newService(ss config.ScaleSetConfig, b backend.Backend) (*service,
 		if err != nil {
 			return nil, err
 		}
-		tokens = &ghapi.AppToken{ClientID: auth.App.ClientID, InstallationID: auth.App.InstallationID, PrivateKeyPEM: key}
+		tokens = &ghapi.AppToken{ClientID: auth.App.ClientID, InstallationID: auth.App.InstallationID, PrivateKeyPEM: key, HTTP: guardHTTP}
 	} else {
 		pat, err := config.ReadSecretFile(auth.PATFile)
 		if err != nil {
@@ -250,8 +254,7 @@ func (a *App) newService(ss config.ScaleSetConfig, b backend.Backend) (*service,
 	}
 	svc := &service{
 		app: a, ss: ss, owner: owner, repo: repo, client: client,
-		// A short HTTP timeout: guard checks run inside the listener loop.
-		guard:  guard.New(&ghapi.Client{Tokens: tokens, HTTP: &http.Client{Timeout: 10 * time.Second}}, owner, ss.AllowRepos),
+		guard:  guard.New(&ghapi.Client{Tokens: tokens, HTTP: guardHTTP}, owner, ss.AllowRepos),
 		logger: a.Logger.With("scale_set", ss.Name),
 	}
 	svc.scaler = scaler.New(scaler.Options{

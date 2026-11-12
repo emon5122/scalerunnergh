@@ -145,6 +145,18 @@ func (g fakeGuard) AllowJob(_ context.Context, owner, repo string, _ int64) (boo
 	return true, "", nil
 }
 
+// slowGuard always allows, slowly.
+type slowGuard struct{ delay time.Duration }
+
+func (g *slowGuard) AllowJob(ctx context.Context, _, _ string, _ int64) (bool, string, error) {
+	select {
+	case <-time.After(g.delay):
+		return true, "", nil
+	case <-ctx.Done():
+		return false, "cannot verify", ctx.Err()
+	}
+}
+
 // flakyGuard cannot verify for the first `failures` calls, then allows.
 type flakyGuard struct {
 	mu       sync.Mutex
@@ -473,27 +485,71 @@ func TestUnverifiableJobFailsTheMessageAfterHandlingTheRest(t *testing.T) {
 	r.s.Close(ctx)
 }
 
-func TestRedeliveredMessageIsNotAcquiredTwiceAndBrokenRunIsDropped(t *testing.T) {
-	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, fakeGuard{err: map[string]error{"flaky": errors.New("403")}})
+func TestRedeliveredMessageIsNotAcquiredTwiceAndNothingIsDroppedUnchecked(t *testing.T) {
+	g := fakeGuard{err: map[string]error{"flaky": errors.New("github 502")}}
+	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, g)
+	// A matrix run: several jobs of one run that cannot be verified right now.
 	msg := &scaleset.RunnerScaleSetMessage{JobAvailableMessages: []*scaleset.JobAvailable{
 		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 1, WorkflowRunID: 11, OwnerName: "o", RepositoryName: "flaky"}},
 		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 2, WorkflowRunID: 22, OwnerName: "o", RepositoryName: "app"}},
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 3, WorkflowRunID: 11, OwnerName: "o", RepositoryName: "flaky"}},
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 4, WorkflowRunID: 11, OwnerName: "o", RepositoryName: "flaky"}},
 	}}
 	ctx := context.Background()
-	for i := 1; i < maxUnverified; i++ {
+	for i := 1; i <= 6; i++ {
 		if err := r.s.Scale(ctx, msg); err == nil {
-			t.Fatalf("delivery %d: the unverifiable run must still fail the message", i)
+			t.Fatalf("delivery %d: a transient failure must keep failing the message, never drop the jobs", i)
 		}
-	}
-	// The run that never verifies is refused for good, so the queue moves on.
-	if err := r.s.Scale(ctx, msg); err != nil {
-		t.Fatalf("after %d attempts the broken run must be dropped, got %v", maxUnverified, err)
 	}
 	if len(r.acq.got) != 1 || fmt.Sprint(r.acq.got[0]) != "[2]" {
 		t.Fatalf("the good job must be acquired exactly once across redeliveries: %v", r.acq.got)
 	}
-	if r.m.Get(metrics.JobsRefused, "set") != 1 {
-		t.Fatal("the dropped run must count as refused")
+	if r.m.Get(metrics.JobsRefused, "set") != 0 {
+		t.Fatal("nothing may be refused because of a transient error")
+	}
+	// GitHub is back: the waiting jobs are acquired.
+	delete(g.err, "flaky")
+	if err := r.s.Scale(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.acq.got) != 2 || fmt.Sprint(r.acq.got[1]) != "[1 3 4]" {
+		t.Fatalf("after recovery the remaining jobs must be acquired: %v", r.acq.got)
+	}
+}
+
+func TestGuardDeadlineDefersTheRestUnchecked(t *testing.T) {
+	old := guardPhaseTimeout
+	guardPhaseTimeout = 30 * time.Millisecond
+	defer func() { guardPhaseTimeout = old }()
+	g := &slowGuard{delay: 20 * time.Millisecond}
+	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, g)
+	msg := &scaleset.RunnerScaleSetMessage{}
+	for i := int64(1); i <= 6; i++ {
+		msg.JobAvailableMessages = append(msg.JobAvailableMessages,
+			&scaleset.JobAvailable{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: i, WorkflowRunID: i, OwnerName: "o", RepositoryName: "app"}})
+	}
+	ctx := context.Background()
+	if err := r.s.Scale(ctx, msg); err == nil {
+		t.Fatal("jobs left unchecked at the deadline must fail the message")
+	}
+	if r.m.Get(metrics.JobsRefused, "set") != 0 {
+		t.Fatal("an unchecked job must never be refused")
+	}
+	if len(r.acq.got) != 1 || len(r.acq.got[0]) == 0 || len(r.acq.got[0]) == 6 {
+		t.Fatalf("the jobs checked in time are acquired, the rest wait: %v", r.acq.got)
+	}
+	// Redeliveries make progress until everything is acquired.
+	for i := 0; i < 10; i++ {
+		if err := r.s.Scale(ctx, msg); err == nil {
+			break
+		}
+	}
+	total := 0
+	for _, ids := range r.acq.got {
+		total += len(ids)
+	}
+	if total != 6 {
+		t.Fatalf("every job must be acquired exactly once in the end, got %d: %v", total, r.acq.got)
 	}
 }
 

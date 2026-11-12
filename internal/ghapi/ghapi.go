@@ -99,6 +99,9 @@ func (a *AppToken) Token(ctx context.Context) (string, error) {
 type StatusError struct {
 	Path   string
 	Status int
+	// RateLimited is set for 429 and for a 403 that is a rate limit
+	// (Retry-After, or no requests remaining): transient, not a denial.
+	RateLimited bool
 }
 
 func (e *StatusError) Error() string {
@@ -110,6 +113,16 @@ func (e *StatusError) Error() string {
 func IsNotFound(err error) bool {
 	var se *StatusError
 	return errors.As(err, &se) && (se.Status == http.StatusNotFound || se.Status == http.StatusGone)
+}
+
+// IsDenied reports whether err is a definite "this credential may not read
+// that" (401, or a 403 that is not a rate limit). Retrying cannot help.
+func IsDenied(err error) bool {
+	var se *StatusError
+	if !errors.As(err, &se) || se.RateLimited {
+		return false
+	}
+	return se.Status == http.StatusUnauthorized || se.Status == http.StatusForbidden
 }
 
 // Client calls the REST API.
@@ -197,7 +210,10 @@ func (c *Client) get(ctx context.Context, path string, dest any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		return &StatusError{Path: path, Status: resp.StatusCode}
+		limited := resp.StatusCode == http.StatusTooManyRequests ||
+			(resp.StatusCode == http.StatusForbidden &&
+				(resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-RateLimit-Remaining") == "0"))
+		return &StatusError{Path: path, Status: resp.StatusCode, RateLimited: limited}
 	}
 	return json.NewDecoder(resp.Body).Decode(dest)
 }

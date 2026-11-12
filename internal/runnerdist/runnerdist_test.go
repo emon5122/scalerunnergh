@@ -108,6 +108,7 @@ func TestEnsureRejectsEscapes(t *testing.T) {
 		"chained links":   {{name: "d/l", body: "..", link: true}, {name: "d/x", body: "l/..", link: true}, {name: "d/x/evil", body: "x"}},
 		"write via link":  {{name: "l", body: "bin", link: true}, {name: "l", body: "overwrite"}},
 		"target via link": {{name: "d/l", body: "..", link: true}, {name: "d/x", body: "l/..", link: true}},
+		"dangling climb":  {{name: "a", body: "x/..", link: true}, {name: "x", body: ".", link: true}},
 		"link via link":   {{name: "top/keep", body: "x"}, {name: "a/b/c", body: "../../top", link: true}, {name: "a/b/c/l", body: "../../../victim", link: true}},
 	} {
 		b := tgz(t, entries)

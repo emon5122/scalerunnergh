@@ -83,7 +83,8 @@ func (g *Guard) CheckTarget(ctx context.Context, owner, repo, group string) erro
 // AllowJob decides whether a job may run here. allowed=false with err=nil is
 // a definite refusal (public repo, repo off the allow list, a run whose head
 // is another repository, i.e. a fork). err != nil means GitHub could not be
-// asked; the job must not run, and the caller should retry later.
+// asked (network, 5xx, rate limit); the job must not run, and the caller
+// retries later. A 401/403/404 answer is a refusal, not an error.
 //
 // The decision never depends on the event name in the message: the workflow
 // run is always fetched and its head repository compared with the repository.
@@ -99,9 +100,10 @@ func (g *Guard) AllowJob(ctx context.Context, owner, repo string, runID int64) (
 		return false, "repository not in allow_repos", nil
 	}
 	private, err := g.repoPrivate(ctx, owner, repo)
-	if ghapi.IsNotFound(err) {
-		// Gone, or not visible to this credential: a definite no, not a retry.
-		return false, "repository not found", nil
+	if ghapi.IsNotFound(err) || ghapi.IsDenied(err) {
+		// Gone, or not readable with this credential: a definite no. Retrying
+		// cannot change it, and it must not hold up other jobs.
+		return false, "repository not found or not readable with this credential", nil
 	}
 	if err != nil {
 		return false, "cannot verify repository", fmt.Errorf("guard: %w", err)
@@ -119,8 +121,8 @@ func (g *Guard) AllowJob(ctx context.Context, owner, repo string, runID int64) (
 		}
 		run, err = g.api.GetRun(ctx, owner, repo, runID)
 	}
-	if ghapi.IsNotFound(err) {
-		return false, "workflow run not found", nil
+	if ghapi.IsNotFound(err) || ghapi.IsDenied(err) {
+		return false, "workflow run not found or not readable with this credential", nil
 	}
 	if err != nil {
 		return false, "cannot verify workflow run", fmt.Errorf("guard: %w", err)

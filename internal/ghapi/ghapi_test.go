@@ -27,6 +27,18 @@ func TestClientGets(t *testing.T) {
 			fmt.Fprint(w, `{"full_name":"o/r","private":true,"visibility":"private"}`)
 		case "/repos/o/r/actions/runs/5":
 			fmt.Fprint(w, `{"event":"pull_request","repository":{"full_name":"o/r"},"head_repository":{"full_name":"x/r"}}`)
+		case "/repos/o/limited":
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.WriteHeader(http.StatusForbidden)
+		case "/repos/o/secondary":
+			w.Header().Set("Retry-After", "30")
+			w.WriteHeader(http.StatusForbidden)
+		case "/repos/o/forbidden":
+			w.WriteHeader(http.StatusForbidden)
+		case "/repos/o/busy":
+			w.WriteHeader(http.StatusTooManyRequests)
+		case "/repos/o/broken":
+			w.WriteHeader(http.StatusBadGateway)
 		case "/orgs/o/actions/runner-groups":
 			fmt.Fprint(w, `{"runner_groups":[{"id":3,"name":"vps-private","allows_public_repositories":false}]}`)
 		default:
@@ -48,8 +60,17 @@ func TestClientGets(t *testing.T) {
 	if _, err := c.GetRepo(ctx, "o", "missing"); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Errorf("want 404 error, got %v", err)
 	}
+	for repo, want := range map[string][2]bool{ // {IsDenied, IsNotFound}
+		"forbidden": {true, false}, "limited": {false, false}, "secondary": {false, false},
+		"busy": {false, false}, "broken": {false, false}, "missing": {false, true},
+	} {
+		_, err := c.GetRepo(ctx, "o", repo)
+		if err == nil || IsDenied(err) != want[0] || IsNotFound(err) != want[1] {
+			t.Errorf("%s: denied=%v notfound=%v err=%v", repo, IsDenied(err), IsNotFound(err), err)
+		}
+	}
 	bad := &Client{BaseURL: srv.URL, Tokens: StaticToken("secret-value")}
-	if _, err := bad.GetRepo(ctx, "o", "r"); err == nil || strings.Contains(err.Error(), "secret-value") {
+	if _, err := bad.GetRepo(ctx, "o", "r"); err == nil || !IsDenied(err) || strings.Contains(err.Error(), "secret-value") {
 		t.Errorf("error must not contain the token: %v", err)
 	}
 }

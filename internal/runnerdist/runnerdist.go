@@ -200,17 +200,23 @@ func safeLink(dest, p, name, linkname string) error {
 	// Walk the target one component at a time from the real parent, following
 	// links unpacked earlier. A lexical clean would hide "link/.." tricks.
 	cur := realParent
+	missing := false // a component not unpacked yet: it could become a link later
 	for _, comp := range strings.Split(filepath.ToSlash(linkname), "/") {
 		switch comp {
 		case "", ".":
 			continue
 		case "..":
+			if missing {
+				return fmt.Errorf("archive symlink %q climbs out of a path that does not exist yet", name)
+			}
 			cur = filepath.Dir(cur)
 		default:
 			next := filepath.Join(cur, comp)
 			if real, err := filepath.EvalSymlinks(next); err == nil {
 				next = real
-			} else if !errors.Is(err, os.ErrNotExist) {
+			} else if errors.Is(err, os.ErrNotExist) {
+				missing = true
+			} else {
 				return err
 			}
 			cur = next
