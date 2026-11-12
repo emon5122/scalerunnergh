@@ -47,7 +47,9 @@ func TestDockerBackendRunsOneJobWithLimits(t *testing.T) {
 	defer cancel()
 	h, err := d.Start(ctx, backend.RunnerSpec{
 		Name: "srg-it-limits", ScaleSet: "it", JITConfig: "JIT-INTEGRATION", Image: testImage,
-		Limits: config.Limits{CPUs: 1.5, MemoryMB: 256, Pids: 128, CPUShares: 128, OOMScoreAdj: 1000},
+		// blkio_weight makes `docker create` print a warning on hosts without
+		// that controller; the start must still work.
+		Limits: config.Limits{CPUs: 1.5, MemoryMB: 256, Pids: 128, CPUShares: 128, BlkioWeight: 100, OOMScoreAdj: 1000},
 	})
 	if err != nil {
 		t.Fatal(err)

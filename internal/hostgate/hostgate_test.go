@@ -46,6 +46,18 @@ func TestLoadGate(t *testing.T) {
 	}
 }
 
+func TestKillSwitchFailsClosed(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "plain-file")
+	os.WriteFile(file, nil, 0o644)
+	// A path below a regular file cannot be checked (ENOTDIR): treated as on.
+	if !(KillSwitch{Path: filepath.Join(file, "STOP")}).Active() {
+		t.Fatal("an unreadable kill switch must count as on")
+	}
+	if (KillSwitch{Path: filepath.Join(t.TempDir(), "STOP")}).Active() || (KillSwitch{}).Active() {
+		t.Fatal("a missing file or no path means off")
+	}
+}
+
 func TestKillSwitch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "STOP")
 	var mu sync.Mutex

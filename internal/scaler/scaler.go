@@ -34,9 +34,11 @@ type JobAcquirer interface {
 	AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error)
 }
 
-// JobGuard decides whether a job may run on this host.
+// JobGuard decides whether a job may run on this host. allowed=false with a
+// nil error is a definite refusal; a non-nil error means it could not be
+// verified (the job must not run, and the check is retried).
 type JobGuard interface {
-	AllowJob(ctx context.Context, owner, repo, event string, runID int64) (bool, string)
+	AllowJob(ctx context.Context, owner, repo string, runID int64) (allowed bool, reason string, err error)
 }
 
 // Options configure a Scaler.
@@ -64,6 +66,7 @@ type runnerState struct {
 	handle   backend.Handle
 	slot     *pool.Slot
 	busy     bool
+	busyCh   chan struct{} // closed when the runner takes a job
 	started  time.Time
 	stopping bool
 }
@@ -79,8 +82,17 @@ type Scaler struct {
 	assigned     int
 	surplusSince time.Time
 	closed       bool
+	draining     bool
+	cooldown     time.Time // no starts before this (a runner died right after start)
 	wg           sync.WaitGroup
 }
+
+// quickExit is how soon after its start a runner that never took a job must
+// die to count as a failed start; startCooldown is the pause that follows.
+var (
+	quickExit     = 15 * time.Second
+	startCooldown = 30 * time.Second
+)
 
 // New creates a scaler.
 func New(o Options) *Scaler {
@@ -118,7 +130,13 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 	if len(msg.JobAvailableMessages) > 0 {
 		ids := make([]int64, 0, len(msg.JobAvailableMessages))
 		for _, j := range msg.JobAvailableMessages {
-			if ok, reason := s.o.Guard.AllowJob(ctx, j.OwnerName, j.RepositoryName, j.EventName, j.WorkflowRunID); !ok {
+			ok, reason, err := s.o.Guard.AllowJob(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
+			if err != nil {
+				// Not verifiable right now: do not acquire, and fail the message
+				// so it is not acknowledged and comes again after a reconnect.
+				return fmt.Errorf("guard check for %s/%s run %d: %w", j.OwnerName, j.RepositoryName, j.WorkflowRunID, err)
+			}
+			if !ok {
 				s.o.Metrics.Add(metrics.JobsRefused, s.o.ScaleSet.Name, 1)
 				s.o.Logger.Warn("job refused, not acquired", "reason", reason,
 					"repo", j.OwnerName+"/"+j.RepositoryName, "event", j.EventName, "run_id", j.WorkflowRunID)
@@ -128,6 +146,9 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 		}
 		s.mu.Lock()
 		acq := s.acquirer
+		if s.draining || s.closed {
+			acq = nil // shutting down: the next process acquires them
+		}
 		s.mu.Unlock()
 		if len(ids) > 0 && acq != nil {
 			if _, err := acq.AcquireJobs(ctx, ids); err != nil {
@@ -157,8 +178,9 @@ func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage)
 func (s *Scaler) jobStarted(ctx context.Context, j *scaleset.JobStarted) {
 	s.mu.Lock()
 	r := s.runners[j.RunnerName]
-	if r != nil {
+	if r != nil && !r.busy {
 		r.busy = true
+		close(r.busyCh)
 	}
 	s.mu.Unlock()
 	s.o.Logger.Info("job started", "runner", j.RunnerName,
@@ -166,7 +188,11 @@ func (s *Scaler) jobStarted(ctx context.Context, j *scaleset.JobStarted) {
 	if r == nil {
 		return
 	}
-	if ok, reason := s.o.Guard.AllowJob(ctx, j.OwnerName, j.RepositoryName, j.EventName, j.WorkflowRunID); !ok {
+	ok, reason, err := s.o.Guard.AllowJob(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID)
+	if err != nil {
+		ok, reason = false, "cannot verify the running job: "+err.Error() // fail closed
+	}
+	if !ok {
 		s.o.Metrics.Add(metrics.JobsRefused, s.o.ScaleSet.Name, 1)
 		s.o.Logger.Error("stopping runner: job refused by guard", "reason", reason, "runner", j.RunnerName,
 			"repo", j.OwnerName+"/"+j.RepositoryName, "event", j.EventName)
@@ -180,7 +206,7 @@ func (s *Scaler) Reconcile(ctx context.Context) {
 	ss := s.o.ScaleSet
 	for {
 		s.mu.Lock()
-		if s.closed {
+		if s.closed || s.draining {
 			s.mu.Unlock()
 			return
 		}
@@ -189,6 +215,11 @@ func (s *Scaler) Reconcile(ctx context.Context) {
 		if count >= desired {
 			s.mu.Unlock()
 			break
+		}
+		if time.Now().Before(s.cooldown) {
+			s.mu.Unlock()
+			s.report()
+			return // a runner just died at start; the ticker retries
 		}
 		slot, ok, reason := s.o.Pool.TryAcquire(ss.Heavy)
 		if !ok {
@@ -199,34 +230,52 @@ func (s *Scaler) Reconcile(ctx context.Context) {
 			return
 		}
 		s.starting++
+		s.wg.Add(1) // Close waits for a start in flight
 		s.mu.Unlock()
 
-		r, err := s.start(ctx, slot)
-		s.mu.Lock()
-		s.starting--
-		if err == nil {
-			if s.closed {
-				s.mu.Unlock()
-				s.teardown(r, false)
-				return
-			}
-			s.runners[r.name] = r
-			s.wg.Add(1)
-			go s.watch(r)
-		}
-		s.mu.Unlock()
-		if err != nil {
-			slot.Release()
-			s.o.Metrics.Add(metrics.StartErrors, ss.Name, 1)
-			s.o.Logger.Error("runner start failed", "error", err)
+		started := s.startOne(ctx, slot)
+		s.wg.Done()
+		if !started {
 			s.report()
 			return // retried on the next message or tick
 		}
-		s.o.Metrics.Add(metrics.RunnersStarted, ss.Name, 1)
 	}
 	s.o.Metrics.Set(metrics.CapacityBlocked, ss.Name, 0)
 	s.trimIdle(ctx)
 	s.report()
+}
+
+// startOne starts one runner on the given slot and registers it. If the
+// scaler was closed or the host paused meanwhile, the runner is removed again.
+func (s *Scaler) startOne(ctx context.Context, slot *pool.Slot) bool {
+	ss := s.o.ScaleSet
+	r, err := s.start(ctx, slot)
+	if err != nil {
+		s.mu.Lock()
+		s.starting--
+		s.mu.Unlock()
+		slot.Release()
+		s.o.Metrics.Add(metrics.StartErrors, ss.Name, 1)
+		s.o.Logger.Error("runner start failed", "error", err)
+		return false
+	}
+	s.mu.Lock()
+	if s.closed || s.draining || s.o.Pool.Paused() {
+		s.mu.Unlock()
+		s.o.Logger.Warn("removing runner started during shutdown or pause", "runner", r.name)
+		s.teardown(r, false)
+		s.mu.Lock()
+		s.starting--
+		s.mu.Unlock()
+		return false
+	}
+	s.starting--
+	s.runners[r.name] = r
+	s.wg.Add(1)
+	go s.watch(r)
+	s.mu.Unlock()
+	s.o.Metrics.Add(metrics.RunnersStarted, ss.Name, 1)
+	return true
 }
 
 func (s *Scaler) start(ctx context.Context, slot *pool.Slot) (*runnerState, error) {
@@ -260,26 +309,54 @@ func (s *Scaler) start(ctx context.Context, slot *pool.Slot) (*runnerState, erro
 		return nil, fmt.Errorf("backend %s: %w", s.o.Backend.Name(), err)
 	}
 	s.o.Logger.Info("runner started", "runner", name, "backend", s.o.Backend.Name())
-	return &runnerState{name: name, runnerID: runnerID, handle: h, slot: slot, started: time.Now()}, nil
+	return &runnerState{name: name, runnerID: runnerID, handle: h, slot: slot, started: time.Now(), busyCh: make(chan struct{})}, nil
 }
 
-// watch waits for the runner to exit (or its time limit) and cleans up.
+// watch waits for the runner to exit and cleans up. max_job_duration counts
+// from the moment the runner takes a job, not from its start, so a warm idle
+// runner is never cut short.
 func (s *Scaler) watch(r *runnerState) {
 	defer s.wg.Done()
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	exited := make(chan struct{})
+	overtime := make(chan struct{})
 	if s.o.MaxJobDuration > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, s.o.MaxJobDuration)
-		defer cancel()
+		go func() {
+			select {
+			case <-exited:
+				return
+			case <-r.busyCh:
+			}
+			t := time.NewTimer(s.o.MaxJobDuration)
+			defer t.Stop()
+			select {
+			case <-exited:
+			case <-t.C:
+				close(overtime)
+				cancel()
+			}
+		}()
 	}
 	code, err := s.o.Backend.Wait(ctx, r.handle)
-	if ctx.Err() != nil {
-		s.o.Logger.Error("runner exceeded max_job_duration, stopping", "runner", r.name)
+	close(exited)
+	timedOut := false
+	select {
+	case <-overtime:
+		timedOut = true
+		s.o.Logger.Error("job exceeded max_job_duration, stopping runner", "runner", r.name)
+	default:
 	}
 	s.mu.Lock()
 	delete(s.runners, r.name)
-	forced := r.stopping
+	forced := r.stopping || timedOut
 	wasBusy := r.busy
+	if !wasBusy && !forced && time.Since(r.started) < quickExit {
+		// Died right after start without taking a job (bad image, rejected
+		// runner version): do not spin, pause before the next start.
+		s.cooldown = time.Now().Add(startCooldown)
+		s.o.Logger.Error("runner exited right after start; pausing starts", "runner", r.name, "exit_code", code, "pause", startCooldown)
+	}
 	s.mu.Unlock()
 
 	s.teardown(r, wasBusy)
@@ -299,7 +376,16 @@ func (s *Scaler) watch(r *runnerState) {
 func (s *Scaler) teardown(r *runnerState, ranJob bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := s.o.Backend.Stop(ctx, r.handle); err != nil {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err = s.o.Backend.Stop(ctx, r.handle); err == nil {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * time.Second)
+	}
+	if err != nil {
+		// The slot is still returned: a stuck leftover must not block CI for
+		// good. It is removed by the startup cleanup at the latest.
 		s.o.Logger.Error("runner cleanup failed", "runner", r.name, "error", err)
 	}
 	if !ranJob && r.runnerID != 0 {
@@ -393,22 +479,38 @@ func (s *Scaler) StopAll(ctx context.Context, why string) {
 	}
 }
 
-// Close stops every runner and waits for their cleanup. The scaler starts
-// nothing afterwards.
+// SetDraining stops new starts and job acquisition; running runners continue.
+func (s *Scaler) SetDraining() {
+	s.mu.Lock()
+	s.draining = true
+	s.mu.Unlock()
+}
+
+// Close stops every runner and waits for their cleanup, including a start
+// that is still in flight. The scaler starts nothing afterwards.
 func (s *Scaler) Close(ctx context.Context) {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
-	s.StopAll(ctx, "shutdown")
 	done := make(chan struct{})
 	go func() { s.wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-ctx.Done():
+	// Runners can still be registered by a start in flight, so stop until
+	// everything is gone.
+	t := time.NewTicker(200 * time.Millisecond)
+	defer t.Stop()
+	for {
+		s.StopAll(ctx, "shutdown")
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 	}
 }
 
-// Count returns alive and busy runners.
+// Count returns alive runners (including starts in flight) and busy runners.
 func (s *Scaler) Count() (alive, busy int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -417,7 +519,7 @@ func (s *Scaler) Count() (alive, busy int) {
 			busy++
 		}
 	}
-	return len(s.runners), busy
+	return len(s.runners) + s.starting, busy
 }
 
 // RunnerName builds a unique runner name that fits GitHub's 64-character limit.

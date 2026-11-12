@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"golang.org/x/sys/windows/svc"
 )
@@ -38,6 +39,10 @@ func (h *handler) Execute(_ []string, reqs <-chan svc.ChangeRequest, status chan
 	done := make(chan error, 1)
 	go func() { done <- h.fn(h.ctx) }()
 	status <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+	stopping := false
+	var checkpoint uint32
+	tick := time.NewTicker(10 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case err := <-done:
@@ -47,12 +52,20 @@ func (h *handler) Execute(_ []string, reqs <-chan svc.ChangeRequest, status chan
 				return true, 1
 			}
 			return false, 0
+		case <-tick.C:
+			// While draining, keep telling the SCM that the stop is progressing.
+			if stopping {
+				checkpoint++
+				status <- svc.Status{State: svc.StopPending, CheckPoint: checkpoint, WaitHint: 30000}
+			}
 		case r := <-reqs:
 			switch r.Cmd {
 			case svc.Interrogate:
 				status <- r.CurrentStatus
 			case svc.Stop, svc.Shutdown:
-				status <- svc.Status{State: svc.StopPending, WaitHint: 180000}
+				stopping = true
+				checkpoint++
+				status <- svc.Status{State: svc.StopPending, CheckPoint: checkpoint, WaitHint: 30000}
 				h.cancel()
 			}
 		}

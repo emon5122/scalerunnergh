@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/emon5122/scalerunnergh/internal/config"
 )
@@ -39,11 +40,14 @@ func (d *Docker) exec(ctx context.Context, stdin []byte, args ...string) (string
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("docker %s: %w: %s", args[0], err, strings.TrimSpace(string(out)))
+	// stdout and stderr are kept apart: warnings and pull progress go to
+	// stderr and must never be mistaken for a container id or an exit code.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("docker %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 // CreateArgs builds the docker create arguments. The JIT config is not in them.
@@ -100,17 +104,20 @@ func (d *Docker) CreateArgs(spec RunnerSpec) []string {
 
 // Start implements Backend: create, copy the JIT config in as a file, start.
 func (d *Docker) Start(ctx context.Context, spec RunnerSpec) (Handle, error) {
-	id, err := d.run(ctx, nil, d.CreateArgs(spec)...)
-	if err != nil {
+	// The container is addressed by its unique name from here on, never by
+	// parsed CLI output.
+	h := Handle{ID: spec.Name, Name: spec.Name}
+	if _, err := d.run(ctx, nil, d.CreateArgs(spec)...); err != nil {
+		// A failed create can still leave a container behind (e.g. created, then a late error).
+		_ = d.Stop(context.WithoutCancel(ctx), h)
 		return Handle{}, err
 	}
-	h := Handle{ID: id, Name: spec.Name}
 	archive, err := jitTar(spec.JITConfig)
 	if err == nil {
-		_, err = d.run(ctx, archive, "cp", "-", id+":/")
+		_, err = d.run(ctx, archive, "cp", "-", h.ID+":/")
 	}
 	if err == nil {
-		_, err = d.run(ctx, nil, "start", id)
+		_, err = d.run(ctx, nil, "start", h.ID)
 	}
 	if err != nil {
 		_ = d.Stop(context.WithoutCancel(ctx), h)
@@ -140,17 +147,35 @@ func jitTar(jit string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Wait implements Backend.
+// waitRetry is the pause before waiting again on a container that is still running.
+var waitRetry = 5 * time.Second
+
+// Wait implements Backend. A failing `docker wait` (daemon restart, CLI
+// error) does not end the runner: while the container still runs, Wait keeps
+// waiting, so a job is never torn down because of a transient error.
 func (d *Docker) Wait(ctx context.Context, h Handle) (int, error) {
-	out, err := d.run(ctx, nil, "wait", h.ID)
-	if err != nil {
-		return -1, err
+	for {
+		out, err := d.run(ctx, nil, "wait", h.ID)
+		if err == nil {
+			code, perr := strconv.Atoi(strings.TrimSpace(out))
+			if perr != nil {
+				return -1, fmt.Errorf("docker wait: unexpected output %q", out)
+			}
+			return code, nil
+		}
+		if ctx.Err() != nil {
+			return -1, ctx.Err()
+		}
+		running, ierr := d.run(ctx, nil, "inspect", "-f", "{{.State.Running}}", h.ID)
+		if ierr != nil || running != "true" {
+			return -1, err
+		}
+		select {
+		case <-ctx.Done():
+			return -1, ctx.Err()
+		case <-time.After(waitRetry):
+		}
 	}
-	code, err := strconv.Atoi(strings.TrimSpace(out))
-	if err != nil {
-		return -1, fmt.Errorf("docker wait: unexpected output %q", out)
-	}
-	return code, nil
 }
 
 // Stop implements Backend: remove the container and its anonymous volumes.

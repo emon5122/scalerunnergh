@@ -34,6 +34,9 @@ type Config struct {
 	ScaleSets []ScaleSetConfig    `json:"scale_sets"`
 	Metrics   MetricsConfig       `json:"metrics"`
 	LogLevel  string              `json:"log_level"`
+	// LogFile appends logs to this file instead of stdout. Needed for the
+	// Windows service, which has no stdout.
+	LogFile string `json:"log_file,omitempty"`
 }
 
 // HostConfig is the capacity shared by every scale set on this host.
@@ -213,6 +216,11 @@ func Parse(data []byte) (*Config, error) {
 // Validate applies defaults and checks the config.
 func (c *Config) Validate() error {
 	if c.Host.Name == "" {
+		if c.UsesBackend(BackendDocker) {
+			// Inside a container the hostname is the container id and changes on
+			// every recreate; crash cleanup finds leftovers by this name.
+			return errors.New("config: host.name is required with the docker backend")
+		}
 		h, _ := os.Hostname()
 		c.Host.Name = h
 	}

@@ -6,14 +6,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
-const (
-	createNewProcessGroup    = 0x00000200
-	belowNormalPriorityClass = 0x00004000
-)
+const belowNormalPriorityClass = 0x00004000
 
 func runnerCommand(dir string) *exec.Cmd {
 	return exec.Command("cmd.exe", "/d", "/c", filepath.Join(dir, "run.cmd"))
@@ -22,27 +21,65 @@ func runnerCommand(dir string) *exec.Cmd {
 // setProcAttrs starts the runner in a new process group, at below-normal
 // priority when nice > 0.
 func setProcAttrs(cmd *exec.Cmd, nice int) {
-	flags := uint32(createNewProcessGroup)
+	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP)
 	if nice > 0 {
 		flags |= belowNormalPriorityClass
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags, HideWindow: true}
 }
 
-func afterStart(cmd *exec.Cmd, nice int) {}
-
-// killTree ends the runner and every process it started.
-func killTree(pid int, force bool) {
-	_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)).Run()
+// procTree is a Job Object holding the runner and everything it starts.
+// The job is set to kill its processes when the last handle closes, so the
+// tree also dies if the orchestrator itself crashes: no pid is ever killed
+// by number later, which rules out hitting an unrelated process.
+type procTree struct {
+	job windows.Handle
+	pid int
 }
 
-// isRunnerProc reports whether pid still is a cmd.exe/runner process
-// (guards against pid reuse after a crash).
-func isRunnerProc(pid int, dir string) bool {
-	out, err := exec.Command("tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/FO", "CSV", "/NH").Output()
+func afterStart(cmd *exec.Cmd, nice int) procTree {
+	t := procTree{pid: cmd.Process.Pid}
+	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
-		return false
+		return t
 	}
-	s := strings.ToLower(string(out))
-	return strings.Contains(s, "cmd.exe") || strings.Contains(s, "runner.listener")
+	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		windows.CloseHandle(job)
+		return t
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+	if err != nil {
+		windows.CloseHandle(job)
+		return t
+	}
+	defer windows.CloseHandle(h)
+	if err := windows.AssignProcessToJobObject(job, h); err != nil {
+		windows.CloseHandle(job)
+		return t
+	}
+	t.job = job
+	return t
 }
+
+// kill ends every process in the job. Without a job (it could not be
+// created) it falls back to taskkill on the runner's tree while it is alive.
+func (t procTree) kill(force bool) {
+	if t.job != 0 {
+		_ = windows.TerminateJobObject(t.job, 1)
+		return
+	}
+	_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(t.pid)).Run()
+}
+
+func (t procTree) close() {
+	if t.job != 0 {
+		_ = windows.CloseHandle(t.job)
+	}
+}
+
+// killLeftover never kills by pid on Windows: the Job Object already ended
+// the tree when the earlier orchestrator process exited.
+func killLeftover(pid int, dir string) bool { return false }

@@ -55,6 +55,7 @@ func TestParseErrors(t *testing.T) {
 		"protect oom":     {`"oom_score_adj": 1000`, `"oom_score_adj": -500`, "oom_score_adj"},
 		"bad name":        {`"name": "srg-vps"`, `"name": "bad name"`, "must match"},
 		"native w/ image": {`"backend": "docker"`, `"backend": "native"`, "docker-backend settings"},
+		"docker no name":  {`"name": "vps 1!", `, ``, "host.name is required"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

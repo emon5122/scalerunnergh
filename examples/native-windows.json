@@ -16,5 +16,6 @@
       "limits": { "nice": 10 }
     }
   ],
-  "metrics": { "enabled": true, "address": "127.0.0.1:9090" }
+  "metrics": { "enabled": true, "address": "127.0.0.1:9090" },
+  "log_file": "C:\\ProgramData\\scalerunnergh\\scalerunnergh.log"
 }

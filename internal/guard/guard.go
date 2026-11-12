@@ -78,35 +78,41 @@ func (g *Guard) CheckTarget(ctx context.Context, owner, repo, group string) erro
 	return fmt.Errorf("guard: runner group %q not found in %s", group, owner)
 }
 
-// AllowJob decides whether a job may run here. It returns false and the
-// reason for public repos, repos off the allow list, and pull requests whose
-// head is another repository (forks).
-func (g *Guard) AllowJob(ctx context.Context, owner, repo, event string, runID int64) (bool, string) {
+// AllowJob decides whether a job may run here. allowed=false with err=nil is
+// a definite refusal (public repo, repo off the allow list, a run whose head
+// is another repository, i.e. a fork). err != nil means GitHub could not be
+// asked; the job must not run, and the caller should retry later.
+//
+// The decision never depends on the event name in the message: the workflow
+// run is always fetched and its head repository compared with the repository.
+func (g *Guard) AllowJob(ctx context.Context, owner, repo string, runID int64) (allowed bool, reason string, err error) {
 	if owner == "" || repo == "" {
-		return false, "job has no repository"
+		return false, "job has no repository", nil
+	}
+	if runID == 0 {
+		return false, "job has no workflow run id", nil
 	}
 	full := strings.ToLower(owner + "/" + repo)
 	if len(g.allowRepos) > 0 && !g.allowRepos[full] {
-		return false, "repository not in allow_repos"
+		return false, "repository not in allow_repos", nil
 	}
 	private, err := g.repoPrivate(ctx, owner, repo)
 	if err != nil {
-		return false, "cannot verify repository: " + err.Error()
+		return false, "cannot verify repository", fmt.Errorf("guard: %w", err)
 	}
 	if !private {
-		return false, "public repository"
+		return false, "public repository", nil
 	}
-	if strings.HasPrefix(event, "pull_request") {
-		run, err := g.api.GetRun(ctx, owner, repo, runID)
-		if err != nil {
-			return false, "cannot verify pull request: " + err.Error()
-		}
-		if run.HeadRepository == nil || run.Repository == nil ||
-			!strings.EqualFold(run.HeadRepository.FullName, run.Repository.FullName) {
-			return false, "pull request from a fork"
-		}
+	run, err := g.api.GetRun(ctx, owner, repo, runID)
+	if err != nil {
+		return false, "cannot verify workflow run", fmt.Errorf("guard: %w", err)
 	}
-	return true, ""
+	if run.HeadRepository == nil || run.Repository == nil ||
+		!strings.EqualFold(run.HeadRepository.FullName, run.Repository.FullName) ||
+		!strings.EqualFold(run.Repository.FullName, owner+"/"+repo) {
+		return false, "run head is another repository (fork)", nil
+	}
+	return true, "", nil
 }
 
 func (g *Guard) repoPrivate(ctx context.Context, owner, repo string) (bool, error) {

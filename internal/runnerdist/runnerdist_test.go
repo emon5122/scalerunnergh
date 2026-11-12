@@ -98,9 +98,11 @@ func TestEnsureRejectsWrongSHA(t *testing.T) {
 
 func TestEnsureRejectsEscapes(t *testing.T) {
 	for name, entries := range map[string][]entry{
-		"dotdot":       {{name: "../evil", body: "x"}},
-		"abs symlink":  {{name: "l", body: "/etc/passwd", link: true}},
-		"link escapes": {{name: "bin/l", body: "../../outside", link: true}},
+		"dotdot":         {{name: "../evil", body: "x"}},
+		"abs symlink":    {{name: "l", body: "/etc/passwd", link: true}},
+		"link escapes":   {{name: "bin/l", body: "../../outside", link: true}},
+		"chained links":  {{name: "d/l", body: "..", link: true}, {name: "d/x", body: "l/..", link: true}, {name: "d/x/evil", body: "x"}},
+		"write via link": {{name: "l", body: "bin", link: true}, {name: "l", body: "overwrite"}},
 	} {
 		b := tgz(t, entries)
 		url, _ := serve(t, b)

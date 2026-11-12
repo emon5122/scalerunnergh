@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/emon5122/scalerunnergh/internal/config"
 )
@@ -76,7 +77,7 @@ func TestDockerStartCopiesJITAsFile(t *testing.T) {
 	d := NewDocker(config.DockerBackendConfig{Binary: "docker"}, "h")
 	calls := fakeDocker(d, "")
 	h, err := d.Start(context.Background(), spec())
-	if err != nil || h.ID != "cid123" {
+	if err != nil || h.ID != "srg-h-s-abcd" {
 		t.Fatalf("start: %+v %v", h, err)
 	}
 	if len(*calls) != 3 || (*calls)[1].args[0] != "cp" || (*calls)[2].args[0] != "start" {
@@ -117,8 +118,41 @@ func TestDockerStartFailureRemovesContainer(t *testing.T) {
 		t.Fatal("start must fail")
 	}
 	last := (*calls)[len(*calls)-1].args
-	if strings.Join(last, " ") != "rm -f -v cid123" {
+	if strings.Join(last, " ") != "rm -f -v srg-h-s-abcd" {
 		t.Fatalf("container not removed after failed start: %v", last)
+	}
+}
+
+func TestDockerWaitSurvivesTransientErrors(t *testing.T) {
+	old := waitRetry
+	waitRetry = time.Millisecond
+	defer func() { waitRetry = old }()
+	d := NewDocker(config.DockerBackendConfig{Binary: "docker"}, "h")
+	waits := 0
+	d.run = func(_ context.Context, _ []byte, args ...string) (string, error) {
+		switch args[0] {
+		case "wait":
+			waits++
+			if waits < 3 {
+				return "", errors.New("docker wait: daemon restarting")
+			}
+			return "0", nil
+		case "inspect":
+			return "true", nil
+		}
+		return "", nil
+	}
+	if code, err := d.Wait(context.Background(), Handle{ID: "c"}); err != nil || code != 0 || waits != 3 {
+		t.Fatalf("wait must retry while the container runs: code=%d err=%v waits=%d", code, err, waits)
+	}
+	d.run = func(_ context.Context, _ []byte, args ...string) (string, error) {
+		if args[0] == "inspect" {
+			return "false", nil
+		}
+		return "", errors.New("docker wait: boom")
+	}
+	if _, err := d.Wait(context.Background(), Handle{ID: "c"}); err == nil {
+		t.Fatal("wait must fail once the container is gone or stopped")
 	}
 }
 

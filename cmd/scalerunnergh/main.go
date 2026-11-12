@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -81,7 +82,17 @@ func serve(ctx context.Context, cfg *config.Config) error {
 	case "error":
 		level = slog.LevelError
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	var out io.Writer = os.Stdout
+	if cfg.LogFile != "" {
+		// A Windows service has no stdout; log_file is its only log.
+		f, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+		if err != nil {
+			return fmt.Errorf("open log_file: %w", err)
+		}
+		defer f.Close()
+		out = f
+	}
+	logger := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: level}))
 	logger.Info("starting scalerunnergh", "version", version, "host", cfg.Host.Name,
 		"scale_sets", len(cfg.ScaleSets), "max_runners", cfg.Host.MaxRunners, "max_heavy", cfg.Host.MaxHeavy)
 

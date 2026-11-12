@@ -140,14 +140,42 @@ func download(ctx context.Context, url, dest, wantSHA string) error {
 	return nil
 }
 
-// safeJoin refuses archive entries that would land outside dest.
+// safeJoin refuses archive entries that would land outside dest, both by
+// their name and through symlinks already unpacked on the way to them.
 func safeJoin(dest, name string) (string, error) {
 	p := filepath.Join(dest, filepath.FromSlash(name))
-	rel, err := filepath.Rel(dest, p)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if !within(dest, p) {
 		return "", fmt.Errorf("archive entry %q escapes the target dir", name)
 	}
+	realDest, err := filepath.EvalSymlinks(dest)
+	if err != nil {
+		return "", err
+	}
+	// Resolve the deepest existing ancestor of the entry.
+	anc := filepath.Dir(p)
+	for {
+		real, err := filepath.EvalSymlinks(anc)
+		if err == nil {
+			if !within(realDest, real) {
+				return "", fmt.Errorf("archive entry %q escapes the target dir through a symlink", name)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		anc = filepath.Dir(anc)
+	}
+	// Never write through an existing symlink at the entry itself.
+	if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("archive entry %q would overwrite a symlink", name)
+	}
 	return p, nil
+}
+
+func within(dir, p string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func untarGz(archive, dest string) error {

@@ -229,7 +229,7 @@ type Backend interface {
 | Backend | Runs where | Job isolation | Limits | Toolchain |
 |---|---|---|---|---|
 | `docker` | Linux hosts with Docker | One container per job (create, copy the JIT config in, start), removed with its anonymous volumes afterwards. With `dind: true`, a dockerd runs **inside** that one container, so one set of limits covers the job and every container it starts. No host socket. | `--cpus`, `--memory` (swap = memory), `--pids-limit`, `--cpu-shares`, `--oom-score-adj`, `--blkio-weight`, optional `--storage-opt size` | pinned image per scale set (§3.6) |
-| `native` (`native-linux`) | Linux host or WSL, no Docker needed | A runner process per job in a fresh `jobs/<runner>/` dir: a full copy of the pinned actions-runner release (no hardlinks, so a job cannot alter the shared release), with its own `_work`. The dir is deleted after the job and the process group is killed. | concurrency (slot pool), `nice` level | whatever the host has (provisioned by the infra repo) |
+| `native` (`native-linux`) | Linux host or WSL, no Docker needed | A runner process per job in a fresh `jobs/<runner>/` dir: a full copy of the pinned actions-runner release (no hardlinks; the job still runs as the service account, so native mode is for fully trusted repos only), with its own `_work`. The dir is deleted after the job and the process group is killed. | concurrency (slot pool), `nice` level | whatever the host has (provisioned by the infra repo) |
 | `native` (`native-windows`) | Windows host, as a Windows service | Same per-job dir. `run.cmd` runs per job; the process tree is killed with `taskkill /T /F`. | concurrency (slot pool), below-normal priority class | host-installed (VS Build Tools etc.) |
 
 Details:

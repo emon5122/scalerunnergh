@@ -66,27 +66,26 @@ func newFake() *fakeAPI {
 
 func TestAllowJob(t *testing.T) {
 	cases := []struct {
-		name, repo, event string
-		run               int64
-		ok                bool
-		reason            string
+		name, repo string
+		run        int64
+		ok, isErr  bool
+		reason     string
 	}{
-		{"private push", "app", "push", 0, true, ""},
-		{"internal repo", "inner", "push", 0, true, ""},
-		{"public repo", "public", "push", 0, false, "public repository"},
-		{"same-repo PR", "app", "pull_request", 1, true, ""},
-		{"fork PR", "app", "pull_request", 2, false, "fork"},
-		{"fork PR target", "app", "pull_request_target", 2, false, "fork"},
-		{"PR without head repo", "app", "pull_request", 3, false, "fork"},
-		{"PR run unknown", "app", "pull_request", 99, false, "cannot verify pull request"},
-		{"unknown repo", "ghost", "push", 0, false, "cannot verify repository"},
-		{"no repo", "", "push", 0, false, "no repository"},
+		{"private repo, own run", "app", 1, true, false, ""},
+		{"fork run", "app", 2, false, false, "fork"},
+		{"run without head repo", "app", 3, false, false, "fork"},
+		{"run of another repo", "inner", 1, false, false, "fork"},
+		{"public repo", "public", 1, false, false, "public repository"},
+		{"run unknown", "app", 99, false, true, "cannot verify workflow run"},
+		{"no run id", "app", 0, false, false, "no workflow run id"},
+		{"unknown repo", "ghost", 1, false, true, "cannot verify repository"},
+		{"no repo", "", 1, false, false, "no repository"},
 	}
 	for _, c := range cases {
 		g := New(newFake(), "org", nil)
-		ok, reason := g.AllowJob(context.Background(), "org", c.repo, c.event, c.run)
-		if ok != c.ok || !strings.Contains(reason, c.reason) {
-			t.Errorf("%s: got ok=%v reason=%q", c.name, ok, reason)
+		ok, reason, err := g.AllowJob(context.Background(), "org", c.repo, c.run)
+		if ok != c.ok || (err != nil) != c.isErr || !strings.Contains(reason, c.reason) {
+			t.Errorf("%s: got ok=%v reason=%q err=%v", c.name, ok, reason, err)
 		}
 	}
 }
@@ -94,13 +93,13 @@ func TestAllowJob(t *testing.T) {
 func TestAllowReposAndCache(t *testing.T) {
 	api := newFake()
 	g := New(api, "org", []string{"APP", "other/thing"})
-	if ok, _ := g.AllowJob(context.Background(), "org", "app", "push", 0); !ok {
+	if ok, _, _ := g.AllowJob(context.Background(), "org", "app", 1); !ok {
 		t.Error("allow-listed repo must pass (case-insensitive)")
 	}
-	if ok, reason := g.AllowJob(context.Background(), "org", "inner", "push", 0); ok || reason != "repository not in allow_repos" {
+	if ok, reason, _ := g.AllowJob(context.Background(), "org", "inner", 1); ok || reason != "repository not in allow_repos" {
 		t.Errorf("repo off the list must be refused: %v %q", ok, reason)
 	}
-	g.AllowJob(context.Background(), "org", "app", "push", 0)
+	g.AllowJob(context.Background(), "org", "app", 1)
 	if api.repoGets != 1 {
 		t.Errorf("repo visibility should be cached, got %d calls", api.repoGets)
 	}
@@ -110,8 +109,8 @@ func TestFailsClosedOnAPIError(t *testing.T) {
 	api := newFake()
 	api.err = errors.New("boom")
 	g := New(api, "org", nil)
-	if ok, _ := g.AllowJob(context.Background(), "org", "app", "push", 0); ok {
-		t.Error("API error must refuse the job")
+	if ok, _, err := g.AllowJob(context.Background(), "org", "app", 1); ok || err == nil {
+		t.Error("API error must refuse the job and report an error")
 	}
 	if err := g.CheckTarget(context.Background(), "org", "", "vps-private"); err == nil {
 		t.Error("API error must fail the target check")

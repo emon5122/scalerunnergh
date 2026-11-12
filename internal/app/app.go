@@ -32,7 +32,14 @@ type App struct {
 	Metrics *metrics.Collector
 	Pool    *pool.Pool
 
+	mu      sync.Mutex
 	scalers []*scaler.Scaler
+}
+
+func (a *App) scalerList() []*scaler.Scaler {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]*scaler.Scaler(nil), a.scalers...)
 }
 
 // New creates the app and its slot pool.
@@ -70,6 +77,10 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	a.Metrics.Set(metrics.HostSlotsMax, "", float64(cfg.Host.MaxRunners))
 
+	ks := hostgate.KillSwitch{Path: cfg.Host.KillSwitchFile, Logger: a.Logger}
+	// Evaluate the kill switch before any listener starts.
+	a.Pool.SetPaused(ks.Active())
+
 	// Listeners outlive ctx during the drain, so job-started messages still arrive.
 	runCtx, stopListeners := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopListeners()
@@ -81,7 +92,9 @@ func (a *App) Run(ctx context.Context) error {
 			wg.Wait()
 			return fmt.Errorf("scale set %s: %w", ss.Name, err)
 		}
+		a.mu.Lock()
 		a.scalers = append(a.scalers, svc.scaler)
+		a.mu.Unlock()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -89,25 +102,21 @@ func (a *App) Run(ctx context.Context) error {
 		}()
 	}
 
-	ks := hostgate.KillSwitch{
-		Path:   cfg.Host.KillSwitchFile,
-		Logger: a.Logger,
-		OnChange: func(active bool) {
-			if ctx.Err() != nil {
-				return // shutting down: the pool stays paused
-			}
-			a.Pool.SetPaused(active)
-			paused := 0.0
-			if active {
-				paused = 1
-				if cfg.Host.KillSwitchStopsRunning {
-					for _, s := range a.scalers {
-						s.StopAll(context.Background(), "kill switch")
-					}
+	ks.OnChange = func(active bool) {
+		if ctx.Err() != nil {
+			return // shutting down: the pool stays paused
+		}
+		a.Pool.SetPaused(active)
+		paused := 0.0
+		if active {
+			paused = 1
+			if cfg.Host.KillSwitchStopsRunning {
+				for _, s := range a.scalerList() {
+					s.StopAll(context.Background(), "kill switch")
 				}
 			}
-			a.Metrics.Set(metrics.HostPaused, "", paused)
-		},
+		}
+		a.Metrics.Set(metrics.HostPaused, "", paused)
 	}
 	wg.Add(1)
 	go func() {
@@ -117,12 +126,15 @@ func (a *App) Run(ctx context.Context) error {
 
 	<-ctx.Done()
 	a.Pool.SetPaused(true) // no new runners from here on
+	for _, s := range a.scalerList() {
+		s.SetDraining() // and no new jobs acquired
+	}
 	a.drain(cfg.Host.DrainTimeout.Duration)
 	a.Logger.Info("shutting down: stopping runners")
 	stopListeners()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	for _, s := range a.scalers {
+	for _, s := range a.scalerList() {
 		s.Close(stopCtx)
 	}
 	wg.Wait()
@@ -143,7 +155,7 @@ func (a *App) drain(timeout time.Duration) {
 	a.Logger.Info("draining: waiting for running jobs", "timeout", timeout)
 	for time.Since(start) < timeout {
 		alive, busy := 0, 0
-		for _, s := range a.scalers {
+		for _, s := range a.scalerList() {
 			al, b := s.Count()
 			alive, busy = alive+al, busy+b
 		}
@@ -177,7 +189,7 @@ type ScaleSetStatus struct {
 func (a *App) Status() Status {
 	used, heavy := a.Pool.Used()
 	st := Status{Host: a.Config.Host.Name, Paused: a.Pool.Paused(), SlotsUsed: used, SlotsMax: a.Config.Host.MaxRunners, HeavyUsed: heavy}
-	for i, s := range a.scalers {
+	for i, s := range a.scalerList() {
 		alive, busy := s.Count()
 		st.ScaleSets = append(st.ScaleSets, ScaleSetStatus{Name: a.Config.ScaleSets[i].Name, Runners: alive, Busy: busy})
 	}
@@ -270,7 +282,11 @@ func (s *service) setCapacity(n int) {
 // run keeps the scale set registered and its message session alive.
 func (s *service) run(ctx context.Context) {
 	// Reconcile on pool changes and on a timer (blocked starts, idle trim).
+	var bg sync.WaitGroup
+	defer bg.Wait() // run() returns only after a reconcile in flight has finished
+	bg.Add(1)
 	go func() {
+		defer bg.Done()
 		sub := s.app.Pool.Subscribe()
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
@@ -285,11 +301,16 @@ func (s *service) run(ctx context.Context) {
 		}
 	}()
 
-	backoff := 5 * time.Second
+	const minBackoff = 5 * time.Second
+	backoff := minBackoff
 	for ctx.Err() == nil {
+		began := time.Now()
 		err := s.session(ctx)
 		if ctx.Err() != nil {
 			return
+		}
+		if time.Since(began) > 2*time.Minute {
+			backoff = minBackoff // the session worked for a while: start over
 		}
 		s.app.Metrics.Add(metrics.ListenerErrors, s.ss.Name, 1)
 		s.logger.Error("listener stopped, retrying", "error", err, "in", backoff)

@@ -108,13 +108,14 @@ type KillSwitch struct {
 	Logger   *slog.Logger
 }
 
-// Active reports whether the switch file exists now.
+// Active reports whether the switch is on: the file exists, or it cannot be
+// checked (any error but "does not exist" counts as on, so it fails closed).
 func (k KillSwitch) Active() bool {
 	if k.Path == "" {
 		return false
 	}
 	_, err := os.Stat(k.Path)
-	return err == nil
+	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
 // Run polls until ctx ends. It calls OnChange once at start with the current

@@ -42,6 +42,7 @@ type nativeProc struct {
 	code int
 	err  error
 	log  *os.File
+	tree procTree // the runner and everything it started
 }
 
 // NewNative creates the native backend.
@@ -102,10 +103,10 @@ func (n *Native) Start(ctx context.Context, spec RunnerSpec) (Handle, error) {
 		removeAll(dir)
 		return Handle{}, fmt.Errorf("native: start runner: %w", err)
 	}
-	afterStart(cmd, spec.Limits.Nice)
+	tree := afterStart(cmd, spec.Limits.Nice)
 	_ = os.WriteFile(filepath.Join(dir, ".srg-pid"), []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
 
-	p := &nativeProc{cmd: cmd, done: make(chan struct{}), log: logf}
+	p := &nativeProc{cmd: cmd, done: make(chan struct{}), log: logf, tree: tree}
 	go func() {
 		err := cmd.Wait()
 		var ee *exec.ExitError
@@ -152,19 +153,20 @@ func (n *Native) Stop(ctx context.Context, h Handle) error {
 		select {
 		case <-p.done:
 		default:
-			killTree(p.cmd.Process.Pid, false)
+			p.tree.kill(false)
 			select {
 			case <-p.done:
 			case <-time.After(10 * time.Second):
-				killTree(p.cmd.Process.Pid, true)
+				p.tree.kill(true)
 				select {
 				case <-p.done:
 				case <-time.After(10 * time.Second):
 				}
 			}
 		}
-		// Children that outlived the runner (same process group / tree).
-		killTree(p.cmd.Process.Pid, true)
+		// Children that outlived the runner, then release the handle.
+		p.tree.kill(true)
+		p.tree.close()
 	}
 	if !n.ownsDir(h.ID) {
 		return fmt.Errorf("native: refusing to remove %q (outside %s)", h.ID, n.jobsDir())
@@ -198,9 +200,8 @@ func (n *Native) Cleanup(ctx context.Context) error {
 			continue
 		}
 		if b, err := os.ReadFile(filepath.Join(dir, ".srg-pid")); err == nil {
-			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 1 && isRunnerProc(pid, dir) {
-				n.logger.Warn("killing leftover runner process", "pid", pid, "dir", dir)
-				killTree(pid, true)
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 1 && killLeftover(pid, dir) {
+				n.logger.Warn("killed leftover runner process", "pid", pid, "dir", dir)
 			}
 		}
 		if err := removeAll(dir); err != nil && firstErr == nil {

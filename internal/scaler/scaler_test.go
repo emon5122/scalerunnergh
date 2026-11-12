@@ -26,6 +26,8 @@ type fakeBackend struct {
 	started  []backend.RunnerSpec
 	stopped  map[string]int
 	startErr error
+	// startGate, when set, blocks Start until it is closed.
+	startGate chan struct{}
 }
 
 func newFakeBackend() *fakeBackend {
@@ -35,6 +37,12 @@ func newFakeBackend() *fakeBackend {
 func (f *fakeBackend) Name() string { return "fake" }
 
 func (f *fakeBackend) Start(_ context.Context, spec backend.RunnerSpec) (backend.Handle, error) {
+	f.mu.Lock()
+	gate := f.startGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.startErr != nil {
@@ -122,16 +130,19 @@ func (j *fakeJIT) RemoveRunner(_ context.Context, id int64) error {
 	return nil
 }
 
-type fakeGuard struct{ deny map[string]string }
+type fakeGuard struct {
+	deny map[string]string // repo -> reason
+	err  map[string]error  // repo -> cannot verify
+}
 
-func (g fakeGuard) AllowJob(_ context.Context, owner, repo, event string, _ int64) (bool, string) {
+func (g fakeGuard) AllowJob(_ context.Context, owner, repo string, _ int64) (bool, string, error) {
+	if e, ok := g.err[repo]; ok {
+		return false, "cannot verify", e
+	}
 	if r, ok := g.deny[repo]; ok {
-		return false, r
+		return false, r, nil
 	}
-	if r, ok := g.deny[event]; ok {
-		return false, r
-	}
-	return true, ""
+	return true, "", nil
 }
 
 type fakeAcquirer struct{ got [][]int64 }
@@ -284,12 +295,12 @@ func TestGuardRefusedJobsAreNotAcquired(t *testing.T) {
 }
 
 func TestRunnerStoppedWhenStartedJobFailsGuard(t *testing.T) {
-	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, fakeGuard{deny: map[string]string{"pull_request": "pull request from a fork"}})
+	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, fakeGuard{deny: map[string]string{"forked": "run head is another repository (fork)"}})
 	ctx := context.Background()
 	r.s.Scale(ctx, stats(1))
 	name := r.b.names()[0]
 	r.s.Scale(ctx, &scaleset.RunnerScaleSetMessage{
-		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: name, JobMessageBase: scaleset.JobMessageBase{OwnerName: "o", RepositoryName: "app", EventName: "pull_request"}}},
+		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: name, JobMessageBase: scaleset.JobMessageBase{OwnerName: "o", RepositoryName: "forked", EventName: ""}}},
 		Statistics:         &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 0},
 	})
 	eventually(t, "runner stopped", func() bool { return alive(r.s) == 0 })
@@ -372,16 +383,117 @@ func TestStartErrorsReleaseSlots(t *testing.T) {
 	r.s.Close(ctx)
 }
 
-func TestMaxJobDurationStopsRunner(t *testing.T) {
-	r := newRig(pool.New(1, 0, nil), config.ScaleSetConfig{MaxRunners: 1}, nil)
-	r.s.o.MaxJobDuration = 40 * time.Millisecond
+func TestMaxJobDurationCountsFromJobStart(t *testing.T) {
+	r := newRig(pool.New(1, 0, nil), config.ScaleSetConfig{MaxRunners: 1, MinRunners: 1}, nil)
+	r.s.o.MaxJobDuration = 60 * time.Millisecond
+	ctx := context.Background()
+	r.s.Scale(ctx, stats(0)) // one warm runner
+	name := r.b.names()[0]
+	time.Sleep(150 * time.Millisecond) // idle longer than the limit
+	if r.b.stops(name) != 0 {
+		t.Fatal("an idle warm runner must not be stopped by max_job_duration")
+	}
+	r.s.Scale(ctx, &scaleset.RunnerScaleSetMessage{
+		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: name, JobMessageBase: scaleset.JobMessageBase{OwnerName: "o", RepositoryName: "app"}}},
+		Statistics:         &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	})
+	eventually(t, "overlong job stopped", func() bool { return r.b.stops(name) > 0 })
+	eventually(t, "counted as failed", func() bool { return r.m.Get(metrics.RunnersFailed, "set") == 1 })
+	r.s.Close(ctx)
+}
+
+func TestUnverifiableJobFailsTheMessage(t *testing.T) {
+	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, fakeGuard{err: map[string]error{"app": errors.New("github down")}})
+	err := r.s.Scale(context.Background(), &scaleset.RunnerScaleSetMessage{JobAvailableMessages: []*scaleset.JobAvailable{
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 1, OwnerName: "o", RepositoryName: "app"}},
+	}})
+	if err == nil {
+		t.Fatal("a job that cannot be verified must fail the message, so it is delivered again")
+	}
+	if len(r.acq.got) != 0 {
+		t.Fatalf("nothing may be acquired: %v", r.acq.got)
+	}
+}
+
+func TestRunningJobThatCannotBeVerifiedIsStopped(t *testing.T) {
+	g := fakeGuard{err: map[string]error{}}
+	r := newRig(pool.New(1, 0, nil), config.ScaleSetConfig{MaxRunners: 1}, g)
 	ctx := context.Background()
 	r.s.Scale(ctx, stats(1))
 	name := r.b.names()[0]
-	r.s.Scale(ctx, stats(0))
-	eventually(t, "overlong runner stopped", func() bool { return r.b.stops(name) > 0 })
-	eventually(t, "slot released", func() bool { u, _ := r.p.Used(); return u == 0 })
+	g.err["app"] = errors.New("github down")
+	r.s.Scale(ctx, &scaleset.RunnerScaleSetMessage{
+		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: name, JobMessageBase: scaleset.JobMessageBase{OwnerName: "o", RepositoryName: "app"}}},
+		Statistics:         &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 0},
+	})
+	eventually(t, "runner stopped (fail closed)", func() bool { return r.b.stops(name) > 0 })
 	r.s.Close(ctx)
+}
+
+func TestDrainingAcquiresAndStartsNothing(t *testing.T) {
+	r := newRig(pool.New(5, 0, nil), config.ScaleSetConfig{MaxRunners: 5}, nil)
+	ctx := context.Background()
+	r.s.Scale(ctx, stats(1))
+	r.s.SetDraining()
+	msg := stats(3)
+	msg.JobAvailableMessages = []*scaleset.JobAvailable{{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 9, OwnerName: "o", RepositoryName: "app"}}}
+	if err := r.s.Scale(ctx, msg); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.acq.got) != 0 || alive(r.s) != 1 {
+		t.Fatalf("draining: acquired=%v runners=%d", r.acq.got, alive(r.s))
+	}
+	if r.b.stops(r.b.names()[0]) != 0 {
+		t.Fatal("draining must not stop the running runner")
+	}
+	r.s.Close(ctx)
+}
+
+func TestRunnerDyingAtStartPausesStarts(t *testing.T) {
+	r := newRig(pool.New(1, 0, nil), config.ScaleSetConfig{MaxRunners: 1}, nil)
+	ctx := context.Background()
+	r.s.Scale(ctx, stats(1))
+	r.b.finish(r.b.names()[0], 1) // dies at once, never took a job
+	eventually(t, "runner gone", func() bool { u, _ := r.p.Used(); return u == 0 })
+	time.Sleep(50 * time.Millisecond)
+	r.s.Reconcile(ctx)
+	if alive(r.s) != 0 || len(r.b.started) != 1 {
+		t.Fatalf("must not restart at once: alive=%d starts=%d", alive(r.s), len(r.b.started))
+	}
+	r.s.mu.Lock()
+	r.s.cooldown = time.Time{}
+	r.s.mu.Unlock()
+	r.s.Reconcile(ctx)
+	if alive(r.s) != 1 {
+		t.Fatal("must start again after the pause")
+	}
+	r.s.Close(ctx)
+}
+
+func TestCloseWaitsForStartInFlight(t *testing.T) {
+	p := pool.New(1, 0, nil)
+	r := newRig(p, config.ScaleSetConfig{MaxRunners: 1}, nil)
+	gate := make(chan struct{})
+	r.b.startGate = gate
+	ctx := context.Background()
+	go r.s.Scale(ctx, stats(1)) // blocks inside Backend.Start
+	eventually(t, "start in flight", func() bool { a, _ := r.s.Count(); return a == 1 })
+	closed := make(chan struct{})
+	go func() { r.s.Close(ctx); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a start was in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(gate)
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return")
+	}
+	if u, _ := p.Used(); u != 0 || len(r.b.names()) != 0 {
+		t.Fatalf("runner started during shutdown survived: used=%d running=%v", u, r.b.names())
+	}
 }
 
 func TestCloseStopsEverythingAndStartsNothing(t *testing.T) {
