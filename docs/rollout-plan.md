@@ -148,8 +148,10 @@ they fit, and replace `internal/github` plus the orchestrator loop.
   needed.
 - All scale sets on a host share one **host slot pool** (`max_runners`, plus
   `max_heavy` = 1 on pc-09), so pc-09 runs one heavy job across all five orgs at a time.
-  Each scale set reports `maxCapacity = free slots`. Jobs beyond that stay queued at GitHub,
-  with no orphaned waiters.
+  Each scale set reports its fixed limit as `maxCapacity` (GitHub reads it only when a
+  long poll starts, so a live "free slots" number goes stale for minutes; found in the
+  spike). Jobs assigned beyond the free slots wait in the orchestrator for the pool, with
+  no orphaned waiters.
 - Every job container gets hard limits (`--cpus`, `--memory`, `--pids-limit`, disk via a
   tmpfs or volume quota) from a per-scale-set profile. Proposed pc-09 profile:
   `--cpus=4 --memory=3g` (today's rule). VPS: to be decided after reading its size.
@@ -274,7 +276,7 @@ suite passing before every push.
 | Step | What | Done when |
 |---|---|---|
 | 0. Fix the audit gaps | Go 1.27 builder, scaleset core, slot pool, guard, backends (docker, native-linux, native-windows), limits and kill switch, crash cleanup, App/PAT auth from files, release-please, ghcr images and binaries, tests | unit, race and integration (docker plus native) tests green; release image on ghcr |
-| 1. Spike | Throwaway scale set `srg-spike` in a private nexisltd group bound to one scratch private repo, run from a local box. Confirm: JIT runner runs a job, multi-label behaviour, the guard sees repo and event, capacity 0 holds jobs | an echo job and a docker-in-job job green |
+| 1. Spike (**done 2026-11-12**, native backend, office PC) | Scale set `srg-spike` in private group `srg-spike` bound only to `nexisltd/scalerunnergh-spike`. Proven live: jobs picked up by name and by extra label, one JIT runner per job, runner and job dir gone afterwards, `max_heavy` 1 runs jobs one at a time, kill switch holds jobs and resumes, drain lets the running job finish, a restart picks up the waiting job. Three defects found and fixed (stale capacity, spare runner, idle runner under the kill switch). Not covered: the docker backend live (first at the VPS pilot) and Windows | done |
 | 2. **Pilot: VPS / home-pbx** | Deploy on the VPS next to vps-slot1..3 as scale set `srg-vps` (docker backend, `media` image). Point home-pbx's deploy lane at it via `vars.CI_RUNS_ON`. Run one week, including a release tag (the ffmpeg case) | home-pbx tag CI builds its images on srg, no manual installs |
 | 3. **rl9: medispa-trodad and radiolens** | Waits for Titli's go; no work on rl9 before. One deployment on rl9 (production), §3.9 profile: `max_runners` 2, `max_heavy` 1, per-job cpu/mem/pids/disk caps, `cpu_shares` 128, `oom_score_adj` 1000, load gate, kill switch file. Move every medispa-trodad and radiolens job there except the macOS matrix jobs (stay GitHub-hosted) | a week of their CI on rl9 with no production latency or alert impact |
 | 4. VPS rest | Move the other 46 repos from `[self-hosted, vps]` (reuse the `vps` label on the scale set, so no workflow edits), then remove vps-slot1..3 and their dind/systemd | `vps-private` group holds only srg |

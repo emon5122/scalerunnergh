@@ -103,7 +103,7 @@ One JSON file per host. Unknown fields are errors. Validate with
 | `max_heavy` | Concurrent runners of scale sets marked `heavy` | `0` (no extra cap) |
 | `max_load_per_core` | No new runner while `load1 / cores` is above this (Linux) | off |
 | `min_mem_available_mb` | No new runner while `MemAvailable` is below this (Linux) | off |
-| `kill_switch_file` | While this file exists, no new jobs are taken | off |
+| `kill_switch_file` | While this file exists, no runner starts and idle runners are removed | off |
 | `kill_switch_stops_running` | The kill switch also stops running jobs | `false` |
 | `idle_timeout` | Surplus idle runners are removed after this long | `3m` |
 | `max_job_duration` | A runner is force-stopped after this long | `6h30m` |

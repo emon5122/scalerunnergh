@@ -460,6 +460,13 @@ func (s *Scaler) watch(r *runnerState) {
 	delete(s.runners, r.name)
 	forced := r.stopping || timedOut
 	wasBusy := r.busy
+	if (wasBusy || (err == nil && code == 0)) && s.assigned > 0 {
+		// An ephemeral runner exits after its one job, so that job is no
+		// longer assigned. GitHub's next statistics correct the number; until
+		// then this keeps a spare runner from being started for a job that is
+		// already done.
+		s.assigned--
+	}
 	if !wasBusy && !forced && (code != 0 || err != nil) && time.Since(r.started) < quickExit {
 		// Died right after start without taking a job (bad image, rejected
 		// runner version): do not spin, pause before the next start.
@@ -554,8 +561,13 @@ func (s *Scaler) trimIdle(ctx context.Context) {
 	}
 }
 
-// report publishes gauges and tells the listener the capacity GitHub may use:
-// what we already run plus what the host could still start for this scale set.
+// report publishes gauges and tells the listener the capacity GitHub may use.
+//
+// The capacity is the scale set's fixed limit, not what is free right now.
+// GitHub reads it only when a new long poll starts (a poll can last minutes),
+// so a momentary "0" while another scale set held the slot, or while the kill
+// switch was on, would keep jobs waiting long after the slot was free again.
+// Jobs assigned beyond the free slots simply wait here for the pool.
 func (s *Scaler) report() {
 	ss := s.o.ScaleSet
 	s.mu.Lock()
@@ -567,11 +579,27 @@ func (s *Scaler) report() {
 		}
 	}
 	s.mu.Unlock()
-	capacity := min(ss.MaxRunners, count+s.o.Pool.Free(ss.Heavy))
+	capacity := min(ss.MaxRunners, s.o.Pool.Limit(ss.Heavy))
 	s.o.Metrics.Set(metrics.RunnersActive, ss.Name, float64(count))
 	s.o.Metrics.Set(metrics.RunnersBusy, ss.Name, float64(busy))
 	if s.o.OnCapacity != nil {
 		s.o.OnCapacity(capacity)
+	}
+}
+
+// StopIdle stops the runners that are not running a job (kill switch: an
+// idle runner would otherwise still take the next job).
+func (s *Scaler) StopIdle(ctx context.Context, why string) {
+	s.mu.Lock()
+	var names []string
+	for n, r := range s.runners {
+		if !r.busy {
+			names = append(names, n)
+		}
+	}
+	s.mu.Unlock()
+	for _, n := range names {
+		s.stopRunner(ctx, n, why)
 	}
 }
 

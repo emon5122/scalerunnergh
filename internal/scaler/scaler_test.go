@@ -311,7 +311,9 @@ func TestHostPoolSharedAcrossScaleSets(t *testing.T) {
 	if alive(a.s) != 1 || alive(b.s) != 0 {
 		t.Fatalf("one heavy job at a time: a=%d b=%d", alive(a.s), alive(b.s))
 	}
-	if a.lastCap() != 1 || b.lastCap() != 0 {
+	// Both report their fixed limit (max_heavy), even while b cannot start:
+	// GitHub only reads the capacity when a new long poll begins.
+	if a.lastCap() != 1 || b.lastCap() != 1 {
 		t.Fatalf("capacity: a=%d b=%d", a.lastCap(), b.lastCap())
 	}
 	if b.m.Get(metrics.CapacityBlocked, "b") != 1 {
@@ -360,6 +362,43 @@ func TestRunnerStoppedWhenStartedJobFailsGuard(t *testing.T) {
 	r.s.Close(ctx)
 }
 
+func TestNoSpareRunnerAfterAJobFinishes(t *testing.T) {
+	r := newRig(pool.New(2, 0, nil), config.ScaleSetConfig{MaxRunners: 2}, nil)
+	ctx := context.Background()
+	r.s.Scale(ctx, stats(1))
+	name := r.b.names()[0]
+	r.s.Scale(ctx, &scaleset.RunnerScaleSetMessage{
+		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: name, JobMessageBase: scaleset.JobMessageBase{OwnerName: "o", RepositoryName: "app"}}},
+		Statistics:         &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+	})
+	// The runner exits before GitHub's statistics say the job is done.
+	r.b.finish(name, 0)
+	eventually(t, "completion counted", func() bool { return r.m.Get(metrics.RunnersCompleted, "set") == 1 })
+	time.Sleep(30 * time.Millisecond)
+	if n := len(r.b.started); n != 1 {
+		t.Fatalf("a spare runner was started for a job that is already done (%d starts)", n)
+	}
+	r.s.Close(ctx)
+}
+
+func TestStopIdleKeepsBusyRunners(t *testing.T) {
+	r := newRig(pool.New(3, 0, nil), config.ScaleSetConfig{MaxRunners: 3}, nil)
+	ctx := context.Background()
+	r.s.Scale(ctx, stats(2))
+	names := r.b.names()
+	r.s.Scale(ctx, &scaleset.RunnerScaleSetMessage{
+		JobStartedMessages: []*scaleset.JobStarted{{RunnerName: names[0], JobMessageBase: scaleset.JobMessageBase{OwnerName: "o", RepositoryName: "app"}}},
+		Statistics:         &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 2},
+	})
+	r.p.SetPaused(true)
+	r.s.StopIdle(ctx, "kill switch")
+	eventually(t, "idle runner stopped", func() bool { return r.b.stops(names[1]) > 0 })
+	if r.b.stops(names[0]) != 0 {
+		t.Fatal("the busy runner must keep running")
+	}
+	r.s.Close(ctx)
+}
+
 func TestPausedPoolStartsNothingThenResumes(t *testing.T) {
 	p := pool.New(3, 0, nil)
 	r := newRig(p, config.ScaleSetConfig{MaxRunners: 3}, nil)
@@ -367,7 +406,9 @@ func TestPausedPoolStartsNothingThenResumes(t *testing.T) {
 	r.s.Scale(ctx, stats(1))
 	p.SetPaused(true)
 	r.s.Scale(ctx, stats(3))
-	if alive(r.s) != 1 || r.lastCap() != 1 {
+	// Nothing starts while paused, but the reported capacity stays at the
+	// limit so jobs are assigned and start the moment the pause ends.
+	if alive(r.s) != 1 || r.lastCap() != 3 {
 		t.Fatalf("paused: runners=%d capacity=%d", alive(r.s), r.lastCap())
 	}
 	r.s.StopAll(ctx, "kill switch")
@@ -581,8 +622,9 @@ func TestFastJobDoesNotPauseStarts(t *testing.T) {
 	ctx := context.Background()
 	r.s.Scale(ctx, stats(1))
 	first := r.b.names()[0]
-	r.b.finish(first, 0) // job done before its started message arrived; another job is waiting
+	r.b.finish(first, 0) // job done before its started message arrived
 	eventually(t, "completion counted", func() bool { return r.m.Get(metrics.RunnersCompleted, "set") == 1 })
+	r.s.Scale(ctx, stats(1)) // GitHub reports the next job
 	eventually(t, "the next job gets a runner at once", func() bool {
 		n := r.b.names()
 		return len(n) == 1 && n[0] != first

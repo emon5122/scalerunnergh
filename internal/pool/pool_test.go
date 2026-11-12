@@ -14,6 +14,9 @@ func TestPoolLimits(t *testing.T) {
 	if _, ok, reason := p.TryAcquire(true); ok || reason != "host at max_heavy" {
 		t.Fatalf("second heavy must be refused, got ok=%v reason=%q", ok, reason)
 	}
+	if p.Limit(true) != 1 || p.Limit(false) != 3 || New(4, 0, nil).Limit(true) != 4 {
+		t.Fatal("Limit must be the fixed host limit")
+	}
 	if p.Free(true) != 0 || p.Free(false) != 2 {
 		t.Fatalf("free: heavy %d light %d", p.Free(true), p.Free(false))
 	}

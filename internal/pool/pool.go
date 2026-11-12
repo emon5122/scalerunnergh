@@ -65,6 +65,15 @@ func (p *Pool) TryAcquire(heavy bool) (*Slot, bool, string) {
 	return &Slot{heavy: heavy, pool: p}, true, ""
 }
 
+// Limit returns the fixed number of runners of this kind the host allows,
+// whatever is in use or paused right now.
+func (p *Pool) Limit(heavy bool) int {
+	if heavy && p.maxHeavy > 0 && p.maxHeavy < p.max {
+		return p.maxHeavy
+	}
+	return p.max
+}
+
 // Free returns how many more runners of this kind could start now, ignoring
 // the gate (the gate is checked at start time).
 func (p *Pool) Free(heavy bool) int {

@@ -111,9 +111,12 @@ func (a *App) Run(ctx context.Context) error {
 		paused := 0.0
 		if active {
 			paused = 1
-			if cfg.Host.KillSwitchStopsRunning {
-				for _, s := range a.scalerList() {
+			for _, s := range a.scalerList() {
+				if cfg.Host.KillSwitchStopsRunning {
 					s.StopAll(context.Background(), "kill switch")
+				} else {
+					// Idle runners go too, or they would take the next job.
+					s.StopIdle(context.Background(), "kill switch")
 				}
 			}
 		}
