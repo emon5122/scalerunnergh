@@ -12,7 +12,7 @@ const validDocker = `{
   "host": {"name": "vps 1!", "max_runners": 3, "max_heavy": 1},
   "auth": {"pat_file": "/run/secrets/pat"},
   "scale_sets": [
-    {"name": "srg-vps", "url": "https://github.com/nexisltd", "runner_group": "vps-private",
+    {"name": "srg-docker", "url": "https://github.com/my-org", "runner_group": "ci-private",
      "labels": ["vps"], "backend": "docker", "image": "img:1", "dind": true, "heavy": true,
      "limits": {"cpus": 2, "memory_mb": 4096, "oom_score_adj": 1000}}
   ]
@@ -46,14 +46,14 @@ func TestParseErrors(t *testing.T) {
 		"no slots":        {`"max_runners": 3`, `"max_runners": 0`, "max_runners"},
 		"heavy over max":  {`"max_heavy": 1`, `"max_heavy": 5`, "max_heavy"},
 		"heavy needs cap": {`"max_heavy": 1`, `"max_heavy": 0`, "heavy scale set"},
-		"no group":        {`"runner_group": "vps-private"`, `"runner_group": ""`, "runner_group"},
-		"bad url":         {`https://github.com/nexisltd`, `http://github.com/nexisltd`, "must be https"},
+		"no group":        {`"runner_group": "ci-private"`, `"runner_group": ""`, "runner_group"},
+		"bad url":         {`https://github.com/my-org`, `http://github.com/my-org`, "must be https"},
 		"bad backend":     {`"backend": "docker"`, `"backend": "k8s"`, "backend must be"},
 		"no image":        {`"image": "img:1"`, `"image": ""`, "image is required"},
 		"no auth":         {`"auth": {"pat_file": "/run/secrets/pat"}`, `"auth": {}`, "pat_file or app"},
 		"both auth":       {`{"pat_file": "/run/secrets/pat"}`, `{"pat_file": "x", "app": {"client_id": "a", "installation_id": 1, "private_key_file": "k"}}`, "not both"},
 		"protect oom":     {`"oom_score_adj": 1000`, `"oom_score_adj": -500`, "oom_score_adj"},
-		"bad name":        {`"name": "srg-vps"`, `"name": "bad name"`, "must match"},
+		"bad name":        {`"name": "srg-docker"`, `"name": "bad name"`, "must match"},
 		"native w/ image": {`"backend": "docker"`, `"backend": "native"`, "docker-backend settings"},
 		"docker no name":  {`"name": "vps 1!", `, ``, "host.name is required"},
 	}
@@ -71,7 +71,7 @@ func TestParseErrors(t *testing.T) {
 }
 
 func TestNativeNeedsPinnedRunner(t *testing.T) {
-	base := `{"host": {"name": "pc09", "max_runners": 1},
+	base := `{"host": {"name": "build-host", "max_runners": 1},
 	  "auth": {"app": {"client_id": "Iv1", "installation_id": 7, "private_key_file": "k.pem"}},
 	  "native": NATIVE,
 	  "scale_sets": [{"name": "w", "url": "https://github.com/o/r", "runner_group": "g", "backend": "native", "limits": {"nice": 10}}]}`
@@ -96,20 +96,20 @@ func TestNativeNeedsPinnedRunner(t *testing.T) {
 
 func TestDuplicateScaleSetName(t *testing.T) {
 	dup := strings.Replace(validDocker, `"scale_sets": [`, `"scale_sets": [
-	  {"name": "srg-vps", "url": "https://github.com/other", "runner_group": "g", "backend": "docker", "image": "i"},`, 1)
+	  {"name": "srg-docker", "url": "https://github.com/other", "runner_group": "g", "backend": "docker", "image": "i"},`, 1)
 	if _, err := Parse([]byte(dup)); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("want duplicate error, got %v", err)
 	}
 }
 
 func TestParseGitHubURL(t *testing.T) {
-	if o, r, err := ParseGitHubURL("https://github.com/nexisltd/"); err != nil || o != "nexisltd" || r != "" {
+	if o, r, err := ParseGitHubURL("https://github.com/my-org/"); err != nil || o != "my-org" || r != "" {
 		t.Errorf("org url: %q %q %v", o, r, err)
 	}
-	if o, r, err := ParseGitHubURL("https://github.com/nexisltd/home-pbx"); err != nil || o != "nexisltd" || r != "home-pbx" {
+	if o, r, err := ParseGitHubURL("https://github.com/my-org/my-repo"); err != nil || o != "my-org" || r != "my-repo" {
 		t.Errorf("repo url: %q %q %v", o, r, err)
 	}
-	for _, bad := range []string{"", "nexisltd", "https://github.com/", "https://github.com/a/b/c"} {
+	for _, bad := range []string{"", "my-org", "https://github.com/", "https://github.com/a/b/c"} {
 		if _, _, err := ParseGitHubURL(bad); err == nil {
 			t.Errorf("%q should fail", bad)
 		}
@@ -147,7 +147,7 @@ func TestDurationJSON(t *testing.T) {
 
 func TestNativeEnvValidation(t *testing.T) {
 	sha := strings.Repeat("ab", 32)
-	base := `{"host": {"name": "pc09", "max_runners": 1},
+	base := `{"host": {"name": "build-host", "max_runners": 1},
 	  "auth": {"app": {"client_id": "Iv1", "installation_id": 7, "private_key_file": "k.pem"}},
 	  "native": {"root": "/srv/srg", "runner_version": "2.338.2", "runner_sha256": "` + sha + `", "env": ENV},
 	  "scale_sets": [{"name": "w", "url": "https://github.com/o/r", "runner_group": "g", "backend": "native"}]}`
@@ -172,7 +172,7 @@ func TestNativeEnvValidation(t *testing.T) {
 
 func TestNativeRunAsValidation(t *testing.T) {
 	sha := strings.Repeat("ab", 32)
-	base := `{"host": {"name": "pc09", "max_runners": 1},
+	base := `{"host": {"name": "build-host", "max_runners": 1},
 	  "auth": {"app": {"client_id": "Iv1", "installation_id": 7, "private_key_file": "k.pem"}},
 	  "native": {"root": "C:\\ProgramData\\srg\\work", "runner_version": "2.338.2", "runner_sha256": "` + sha + `", "run_as": RUNAS},
 	  "scale_sets": [{"name": "w", "url": "https://github.com/o/r", "runner_group": "g", "backend": "native"}]}`

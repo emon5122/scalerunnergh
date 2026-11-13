@@ -181,12 +181,12 @@ func TestDockerWaitSurvivesTransientErrors(t *testing.T) {
 }
 
 func TestDockerCleanup(t *testing.T) {
-	d := NewDocker(config.DockerBackendConfig{Binary: "docker"}, "pc09")
+	d := NewDocker(config.DockerBackendConfig{Binary: "docker"}, "build-host")
 	calls := fakeDocker(d, "")
 	if err := d.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join((*calls)[0].args, " "); got != "ps -aq --filter label=scalerunner.host=pc09" {
+	if got := strings.Join((*calls)[0].args, " "); got != "ps -aq --filter label=scalerunner.host=build-host" {
 		t.Errorf("ps: %s", got)
 	}
 	if got := strings.Join((*calls)[1].args, " "); got != "rm -f -v old1 old2" {
