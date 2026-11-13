@@ -1,12 +1,23 @@
 # ScaleRunnerGH
 
+[![CI](https://github.com/emon5122/scalerunnergh/actions/workflows/ci.yml/badge.svg)](https://github.com/emon5122/scalerunnergh/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/emon5122/scalerunnergh)](https://github.com/emon5122/scalerunnergh/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/emon5122/scalerunnergh)](https://goreportcard.com/report/github.com/emon5122/scalerunnergh)
+
 Ephemeral, auto-scaling GitHub Actions runners for your own hosts, built with Go.
+
+**Status:** in production at the author's hosts since v1.0 (2026); v1.x.
 
 One ScaleRunnerGH runs per host. It serves one or more GitHub **runner scale sets**
 (org-level or repo-level), starts a fresh runner for every job and removes it afterwards.
 A runner is either a container (Docker backend) or a process on the host (native backend,
 Linux and Windows). All scale sets on a host share one slot pool, so a small box never runs
 more than it can take.
+
+> **Private repositories only.** ScaleRunnerGH refuses public repositories and fork pull
+> requests. Never point it at public repos. See the [safety model](#safety-model) and
+> [SECURITY.md](SECURITY.md).
 
 ## How it works
 
@@ -52,47 +63,136 @@ for the runner scale set API.
   environment.
 - **Prometheus metrics** and a Grafana dashboard.
 
-## Quick start (Docker host)
+## Prerequisites and platforms
+
+| Platform | Release asset | Backends |
+|---|---|---|
+| Linux amd64 | `scalerunnergh-linux-amd64`, image `ghcr.io/emon5122/scalerunnergh` | docker, native |
+| Linux arm64 | `scalerunnergh-linux-arm64`, image `ghcr.io/emon5122/scalerunnergh` | docker (with your own arm64 runner image), native |
+| Windows amd64 | `scalerunnergh-windows-amd64.exe` (runs as a Windows service) | native |
+
+- **Docker backend**: Docker Engine on the host (the orchestrator talks to the host
+  daemon). The published runner images are linux/amd64.
+- **Native backend**: the prerequisites of [`actions/runner`](https://github.com/actions/runner)
+  for your OS (on Linux the libraries its `bin/installdependencies.sh` installs, such as
+  ICU), plus every tool your jobs need, installed on the host.
+- A GitHub **organization** for org-level scale sets, or a private repository for a
+  repo-level one. Outbound HTTPS to GitHub only; no inbound ports or webhooks.
+
+## Quick start
+
+### 1. Credentials
+
+Pick one; both are read from a file only.
+
+- **GitHub App (recommended)**: create an App from the manifest in
+  [`deploy/github-app`](deploy/github-app/README.md), turn the one-time code into the App
+  id and private key with `deploy/github-app/convert.sh <code> <dir>`, and install the App
+  on the org. Note the `client_id`, the installation id and the key file.
+- **Classic PAT**: a token with the scopes in [`auth`](#auth-host-default-or-per-scale-set)
+  (`repo`, plus `admin:org` for org-level scale sets), from an account that is an org owner.
+
+Store the key or token as a file readable only by the user that runs ScaleRunnerGH
+(`install -m 600 /dev/stdin <file>`, paste, Ctrl-D).
+
+### 2. A private runner group
+
+In the org: **Settings > Actions > Runner groups**. Create a group (for example
+`ci-private`) with **Allow public repositories** off and only the repositories that may use
+it selected. If your plan has only the `Default` group, use it with *Allow public
+repositories* off. ScaleRunnerGH refuses to start if the group allows public repositories.
+Also keep **Run workflows from fork pull requests** off (org **Settings > Actions > General**,
+fork pull request workflows in private repositories).
+
+Repo-level scale sets (a user account's private repos) use `runner_group: "default"`.
+
+### 3. Config
+
+Start from an example and set the org URL, the runner group, the credential file and the
+scale set name:
+
+| Example | For |
+|---|---|
+| [`docker-host.json`](examples/docker-host.json) | a Docker host, PAT |
+| [`production-host.json`](examples/production-host.json) | a busy host: caps, load gate, kill switch, two orgs with GitHub Apps |
+| [`native-linux.json`](examples/native-linux.json) | native mode on Linux |
+| [`native-windows.json`](examples/native-windows.json) | native mode on Windows |
+
+Native mode also needs `native.runner_version` and `native.runner_sha256` for your OS and
+architecture, from the [`actions/runner` release notes](https://github.com/actions/runner/releases).
+
+Validate it: `scalerunnergh --config config.json --check`.
+
+### 4. Run it
+
+**Docker host** (docker backend):
 
 ```bash
 mkdir -p /srv/scalerunnergh/{secrets,control} && cd /srv/scalerunnergh
-cp <repo>/deploy/compose.yml .
-cp <repo>/examples/vps.json config.json      # edit: org URL, runner group, image tag
+curl -fsSLO https://raw.githubusercontent.com/emon5122/scalerunnergh/main/deploy/compose.yml
+curl -fsSL -o config.json https://raw.githubusercontent.com/emon5122/scalerunnergh/main/examples/docker-host.json
+$EDITOR config.json                          # org URL, runner group, image tag
 install -m 600 /dev/stdin secrets/github_pat # paste the token, Ctrl-D
+docker compose run --rm scalerunnergh --config /etc/scalerunnergh/config.json --check
 docker compose up -d
 ```
 
-Then use the scale set in a workflow:
+For a GitHub App, add the key as another compose secret (for example `app_key`) and set
+`"private_key_file": "/run/secrets/app_key"`. `stop_grace_period` in the compose file
+must be longer than `host.drain_timeout`. Its labels let an image updater such as
+[DockWarden](https://github.com/emon5122/dockwarden) pull new releases; otherwise run
+`docker compose pull && docker compose up -d`.
 
-```yaml
-jobs:
-  build:
-    runs-on: srg-vps        # the scale set name, or [srg-vps, vps] with extra labels
+**Linux, native** (systemd):
+
+```bash
+# arm64: use scalerunnergh-linux-arm64 instead
+curl -fsSLO https://github.com/emon5122/scalerunnergh/releases/latest/download/scalerunnergh-linux-amd64
+curl -fsSLO https://github.com/emon5122/scalerunnergh/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+sudo install -m 755 scalerunnergh-linux-amd64 /usr/local/bin/scalerunnergh
+sudo useradd --system --create-home --shell /usr/sbin/nologin srg
+sudo install -d -o srg -g srg /etc/scalerunnergh /var/lib/scalerunnergh
+# config: /etc/scalerunnergh/config.json, token: /etc/scalerunnergh/github_pat (0600, owner srg)
+sudo -u srg scalerunnergh --config /etc/scalerunnergh/config.json --check
+sudo curl -fsSL -o /etc/systemd/system/scalerunnergh.service \
+  https://github.com/emon5122/scalerunnergh/releases/latest/download/scalerunnergh.service
+sudo systemctl daemon-reload && sudo systemctl enable --now scalerunnergh
 ```
 
-The compose file carries DockWarden labels, so the orchestrator image is updated without
-hand work. `stop_grace_period` must be longer than `host.drain_timeout`.
+Run it as a dedicated non-root user ([`scalerunnergh.service`](deploy/systemd/scalerunnergh.service)
+uses `srg`); the GitHub runner refuses to run as root.
 
-### Native mode (no Docker)
+**Windows, native** (service): download `scalerunnergh-windows-amd64.exe` and
+`install.ps1` from the [latest release](https://github.com/emon5122/scalerunnergh/releases/latest),
+put the exe, the config and the credential file in `C:\ProgramData\scalerunnergh\`, and
+from an elevated PowerShell:
 
-- **Linux**: put the released binary in `/usr/local/bin`, a config like
-  [`examples/native-linux.json`](examples/native-linux.json) in `/etc/scalerunnergh/`, and
-  enable [`deploy/systemd/scalerunnergh.service`](deploy/systemd/scalerunnergh.service).
-  Run it as a dedicated non-root user.
-- **Windows**: `scalerunnergh.exe` runs as a Windows service. Use
-  [`deploy/windows/install.ps1`](deploy/windows/install.ps1) with a config like
-  [`examples/native-windows.json`](examples/native-windows.json).
+```powershell
+.\install.ps1 -Exe C:\ProgramData\scalerunnergh\scalerunnergh.exe `
+              -Config C:\ProgramData\scalerunnergh\config.json `
+              -User '.\srg' -Password (Read-Host -AsSecureString)
+```
+
+It checks the config, installs and starts the service. Without `-User` the service runs
+as LocalSystem; then set `native.run_as` (see [`native`](#docker-and-native)).
 
 In native mode the job uses the tools installed on the host. Every job still gets its own
 copy of the pinned runner release and its own work directory, both deleted afterwards.
 
+### 5. Use it in a workflow
+
+```yaml
+jobs:
+  build:
+    runs-on: srg-docker     # the scale set name, or [srg-docker, docker] with extra labels
+```
+
 ## Configuration
 
 One JSON file per host. Unknown fields are errors. Validate with
-`scalerunnergh --config config.json --check`. Full examples:
-[`vps.json`](examples/vps.json), [`production-host.json`](examples/production-host.json),
-[`native-linux.json`](examples/native-linux.json),
-[`native-windows.json`](examples/native-windows.json).
+`scalerunnergh --config config.json --check`. Full examples are in
+[`examples/`](examples/).
 
 ### `host`
 
@@ -238,6 +338,8 @@ A Prometheus scrape config and a Grafana dashboard are in [`deploy/`](deploy/).
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md). In short:
+
 ```bash
 ./scripts/ci.sh                 # the whole CI suite (needs Docker)
 SKIP_DOCKER=1 ./scripts/ci.sh   # without the Docker lanes
@@ -257,7 +359,6 @@ internal/runnerdist/   pinned runner release for native mode
 internal/config/       host config
 docker/runner/         runner images
 deploy/, examples/     compose, systemd, Windows service, example configs
-docs/rollout-plan.md   audit, design decisions and rollout plan
 ```
 
 Releases are cut by release-please on the built-in `GITHUB_TOKEN` (the repo setting "Allow
@@ -267,4 +368,4 @@ the images to ghcr and attaches the binaries to the GitHub release.
 
 ## License
 
-MIT
+[MIT](LICENSE)
