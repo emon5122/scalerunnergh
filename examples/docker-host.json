@@ -1,6 +1,6 @@
 {
   "host": {
-    "name": "vps",
+    "name": "docker-host",
     "max_runners": 3,
     "max_heavy": 1,
     "kill_switch_file": "/control/STOP",
@@ -10,10 +10,10 @@
   "docker": { "registry_mirror": "" },
   "scale_sets": [
     {
-      "name": "srg-vps",
+      "name": "srg-docker",
       "url": "https://github.com/my-org",
-      "runner_group": "vps-private",
-      "labels": ["vps", "Linux", "docker"],
+      "runner_group": "ci-private",
+      "labels": ["Linux", "docker"],
       "backend": "docker",
       "image": "ghcr.io/emon5122/scalerunnergh-runner:media-1.0.0",
       "dind": true,

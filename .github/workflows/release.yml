@@ -1,7 +1,7 @@
 name: Release
 
 # On a version tag: test, then publish the orchestrator image, the runner
-# images and the binaries. Hosts pick the new images up through DockWarden.
+# images and the binaries. Hosts pick the new images up through an image updater (or by hand).
 on:
     push:
         tags: ["v*"]

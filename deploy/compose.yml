@@ -1,5 +1,6 @@
-# One ScaleRunnerGH per Docker host. The image is updated by DockWarden;
-# nothing here is started by hand after the first `docker compose up -d`.
+# One ScaleRunnerGH per Docker host. The labels let an image updater such as
+# DockWarden (github.com/emon5122/dockwarden) pull new releases; without one,
+# update with `docker compose pull && docker compose up -d`.
 #
 # stop_grace_period must be longer than host.drain_timeout in config.json,
 # so an image update lets running jobs finish.

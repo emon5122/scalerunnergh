@@ -16,7 +16,7 @@ events are needed: the scale set API is a long poll.
 ## Create (manifest flow)
 
 1. Replace `ORG` / `USER` in the manifest `name` (App names are global, for
-   example `scalerunnergh-nexisltd`).
+   example `scalerunnergh-my-org`).
 2. While logged in to GitHub as an owner, POST the manifest from any
    `github.com` tab (browser console, or a browser driver's evaluate):
 

@@ -381,7 +381,7 @@ func TestNoSpareRunnerAfterAJobFinishes(t *testing.T) {
 	r.s.Close(ctx)
 }
 
-// The live case on the office PC: GitHub's JobCompleted message (with fresh
+// A case seen live: GitHub's JobCompleted message (with fresh
 // statistics that already count the next job of the workflow, a `needs:`
 // dependency) arrives before the finished runner's process has exited. The exit
 // must not subtract that job again, or the next job waits for GitHub's next

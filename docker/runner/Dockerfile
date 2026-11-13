@@ -123,8 +123,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
     && rm -rf /var/lib/apt/lists/*
 ENV PATH=/usr/local/go/bin:/home/runner/go/bin:$PATH
 
-# ---- rust: full + rustup + clang/lld 21, cmake, glib headers (wa-gateway), ----
-# ---- and the Tauri v2 Linux build libraries (radiolens viewer/router) -------
+# ---- rust: full + rustup + clang/lld 21, cmake, glib headers, -----------------
+# ---- and the Tauri v2 Linux build libraries -----------------------------------
 # Jobs get no sudo, so everything a Rust job used to apt-get at run time is here.
 # The toolchain itself follows each repo's rust-toolchain.toml (rustup installs it
 # on first use inside the job).

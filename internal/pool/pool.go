@@ -1,7 +1,7 @@
 // Package pool is the host-wide runner slot pool shared by every scale set on
-// a host. It replaces the old pc-09 mkdir lock: a scale set may start a runner
-// only while it holds a slot, heavy scale sets also need a heavy slot, and a
-// gate (load, memory) or a pause (kill switch) can stop new starts at once.
+// a host. A scale set may start a runner only while it holds a slot, heavy
+// scale sets also need a heavy slot, and a gate (load, memory) or a pause
+// (kill switch) can stop new starts at once.
 package pool
 
 import (
