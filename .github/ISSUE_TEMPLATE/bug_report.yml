@@ -1,0 +1,65 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go through a private advisory (Security tab, "Report a vulnerability"), not an issue.
+        Remove tokens, App keys, JIT configs and private repo or host names from everything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `scalerunnergh --version`, or the image tag.
+      placeholder: "v1.3.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - docker
+        - native
+        - both
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Host OS
+      options:
+        - Linux amd64
+        - Linux arm64
+        - Windows amd64
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os-detail
+    attributes:
+      label: OS and runtime details
+      description: Distribution and version, Docker version (docker backend), how it runs (compose, systemd, Windows service).
+      placeholder: "Ubuntu 24.04, Docker 28.x, compose"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+      description: Steps to reproduce, including the workflow's `runs-on`.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Config excerpt (secrets removed)
+      description: The relevant parts of config.json. Never paste a token or key.
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: ScaleRunnerGH logs around the problem (`docker logs scalerunnergh`, `journalctl -u scalerunnergh`, or the Windows log file).
+      render: text
+    validations:
+      required: true
