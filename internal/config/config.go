@@ -129,6 +129,55 @@ type ScaleSetConfig struct {
 	// ExtraArgs are appended to docker create for this scale set only, after docker.extra_args (docker
 	// backend), e.g. a cache volume one org's jobs may see but another's may not.
 	ExtraArgs []string `json:"extra_args,omitempty"`
+	// Pull is the image pull policy (docker backend): "missing" (default: pull only
+	// an image the host does not have), "always" (pull before every runner start;
+	// a failed pull falls back to the local image) or "interval:<duration>" (pull
+	// in the background at most every duration, e.g. "interval:30m").
+	Pull string `json:"pull,omitempty"`
+}
+
+// Image pull policies of ScaleSetConfig.Pull.
+const (
+	PullMissing  = "missing"
+	PullAlways   = "always"
+	PullInterval = "interval"
+)
+
+// MinPullInterval is the shortest pull interval accepted, so a typo never
+// hammers a registry.
+const MinPullInterval = time.Minute
+
+// PullPolicy is a parsed ScaleSetConfig.Pull.
+type PullPolicy struct {
+	Mode     string        // PullMissing, PullAlways or PullInterval
+	Interval time.Duration // PullInterval only
+}
+
+// ParsePull parses a pull policy; "" is PullMissing.
+func ParsePull(s string) (PullPolicy, error) {
+	switch {
+	case s == "" || s == PullMissing:
+		return PullPolicy{Mode: PullMissing}, nil
+	case s == PullAlways:
+		return PullPolicy{Mode: PullAlways}, nil
+	case strings.HasPrefix(s, PullInterval+":"):
+		d, err := time.ParseDuration(strings.TrimPrefix(s, PullInterval+":"))
+		if err != nil {
+			return PullPolicy{}, fmt.Errorf("pull %q: %w", s, err)
+		}
+		if d < MinPullInterval {
+			return PullPolicy{}, fmt.Errorf("pull %q: the interval must be at least %s", s, MinPullInterval)
+		}
+		return PullPolicy{Mode: PullInterval, Interval: d}, nil
+	default:
+		return PullPolicy{}, fmt.Errorf("pull %q must be %q, %q or \"%s:<duration>\"", s, PullMissing, PullAlways, PullInterval)
+	}
+}
+
+// PullPolicy returns the parsed pull policy (valid after Validate).
+func (s ScaleSetConfig) PullPolicy() PullPolicy {
+	p, _ := ParsePull(s.Pull)
+	return p
 }
 
 // DockerBackendConfig holds docker backend settings shared by its scale sets.
@@ -322,10 +371,13 @@ func (c *Config) Validate() error {
 			if s.Image == "" {
 				return fmt.Errorf("%s: image is required for the docker backend", where)
 			}
+			if _, err := ParsePull(s.Pull); err != nil {
+				return fmt.Errorf("%s: %w", where, err)
+			}
 		case BackendNative:
 			usesNative = true
-			if s.DinD || s.Image != "" || s.Limits.GPUs != "" || len(s.ExtraArgs) > 0 {
-				return fmt.Errorf("%s: image, dind, gpus and extra_args are docker-backend settings", where)
+			if s.DinD || s.Image != "" || s.Limits.GPUs != "" || len(s.ExtraArgs) > 0 || s.Pull != "" {
+				return fmt.Errorf("%s: image, dind, gpus, extra_args and pull are docker-backend settings", where)
 			}
 		default:
 			return fmt.Errorf("%s: backend must be %q or %q", where, BackendDocker, BackendNative)
