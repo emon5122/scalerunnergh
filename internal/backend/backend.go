@@ -25,6 +25,8 @@ type RunnerSpec struct {
 	DinD  bool
 	// Limits per runner.
 	Limits config.Limits
+	// ExtraArgs of the scale set, appended to docker create after the backend's (docker backend).
+	ExtraArgs []string
 }
 
 // Handle identifies a started runner inside its backend.

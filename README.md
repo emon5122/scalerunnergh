@@ -250,6 +250,7 @@ One JSON file per host. Unknown fields are errors. Validate with
 | `docker.network`, `docker.runtime` | Network and runtime (for example `sysbox-runc`) for job containers |
 | `docker.registry_mirror` | Pull-through cache passed to the dockerd inside dind jobs |
 | `docker.extra_args` | Extra `docker create` flags (escape hatch) |
+| `scale_sets[].extra_args` | Extra `docker create` flags for this scale set only, after `docker.extra_args` (e.g. a read-only cache volume only one org's jobs see) |
 | `native.root` | Directory for the runner release, job directories and logs |
 | `native.runner_version`, `native.runner_sha256` | Pinned `actions/runner` release for this OS and architecture |
 | `native.env` | Extra environment for every native runner (toolchain paths such as `JAVA_HOME`, runner hooks such as `ACTIONS_RUNNER_HOOK_JOB_STARTED`). The inherited environment drops `ACTIONS_*`, `GITHUB_*`, `SRG_*` and credential-looking names, so set those here. Never secrets |

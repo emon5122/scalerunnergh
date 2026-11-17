@@ -420,6 +420,7 @@ func (s *Scaler) start(ctx context.Context, slot *pool.Slot) (*runnerState, erro
 		Image:     s.o.ScaleSet.Image,
 		DinD:      s.o.ScaleSet.DinD,
 		Limits:    s.o.ScaleSet.Limits,
+		ExtraArgs: s.o.ScaleSet.ExtraArgs,
 	})
 	if err != nil {
 		if runnerID != 0 {

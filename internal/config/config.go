@@ -126,6 +126,9 @@ type ScaleSetConfig struct {
 	Limits Limits `json:"limits"`
 	// AllowRepos optionally restricts jobs to these repos ("repo" or "owner/repo").
 	AllowRepos []string `json:"allow_repos,omitempty"`
+	// ExtraArgs are appended to docker create for this scale set only, after docker.extra_args (docker
+	// backend), e.g. a cache volume one org's jobs may see but another's may not.
+	ExtraArgs []string `json:"extra_args,omitempty"`
 }
 
 // DockerBackendConfig holds docker backend settings shared by its scale sets.
@@ -321,8 +324,8 @@ func (c *Config) Validate() error {
 			}
 		case BackendNative:
 			usesNative = true
-			if s.DinD || s.Image != "" || s.Limits.GPUs != "" {
-				return fmt.Errorf("%s: image, dind and gpus are docker-backend settings", where)
+			if s.DinD || s.Image != "" || s.Limits.GPUs != "" || len(s.ExtraArgs) > 0 {
+				return fmt.Errorf("%s: image, dind, gpus and extra_args are docker-backend settings", where)
 			}
 		default:
 			return fmt.Errorf("%s: backend must be %q or %q", where, BackendDocker, BackendNative)

@@ -47,13 +47,15 @@ func spec() RunnerSpec {
 
 func TestDockerCreateArgs(t *testing.T) {
 	d := NewDocker(config.DockerBackendConfig{Binary: "docker", Network: "srg", Runtime: "sysbox-runc", RegistryMirror: "http://mirror:5000", ExtraArgs: []string{"--dns", "1.1.1.1"}}, "h")
-	got := strings.Join(d.CreateArgs(spec()), " ")
+	sp := spec()
+	sp.ExtraArgs = []string{"-v", "/data/cache:/cache:ro"}
+	got := strings.Join(d.CreateArgs(sp), " ")
 	for _, want := range []string{
 		"create --name srg-h-s-abcd", "--label scalerunner.host=h", "--label scalerunner.scaleset=s",
 		"--cpus 2.5", "--memory 3072m --memory-swap 3072m", "--pids-limit 2048", "--cpu-shares 128",
 		"--blkio-weight 100", "--oom-score-adj 1000", "--storage-opt size=40G", "--gpus all",
 		"--privileged -e SRG_DIND=1 -v /var/lib/docker", "-e SRG_REGISTRY_MIRROR=http://mirror:5000",
-		"--network srg", "--runtime sysbox-runc", "--dns 1.1.1.1 img:1",
+		"--network srg", "--runtime sysbox-runc", "--dns 1.1.1.1 -v /data/cache:/cache:ro img:1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in: %s", want, got)
@@ -66,7 +68,7 @@ func TestDockerCreateArgs(t *testing.T) {
 	plain := spec()
 	plain.DinD, plain.Limits = false, config.Limits{}
 	got = strings.Join(NewDocker(config.DockerBackendConfig{Binary: "docker"}, "h").CreateArgs(plain), " ")
-	for _, bad := range []string{"--privileged", "--memory", "--cpus", "SRG_DIND", "--network", "--gpus"} {
+	for _, bad := range []string{"--privileged", "--memory", "--cpus", "SRG_DIND", "--network", "--gpus", "/cache"} {
 		if strings.Contains(got, bad) {
 			t.Errorf("unexpected %q in: %s", bad, got)
 		}

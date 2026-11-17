@@ -99,6 +99,7 @@ func (d *Docker) CreateArgs(spec RunnerSpec) []string {
 		args = append(args, "--runtime", d.cfg.Runtime)
 	}
 	args = append(args, d.cfg.ExtraArgs...)
+	args = append(args, spec.ExtraArgs...)
 	return append(args, spec.Image)
 }
 
