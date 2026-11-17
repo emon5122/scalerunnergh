@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.0](https://github.com/emon5122/scalerunnergh/compare/v1.3.0...v1.4.0) (2026-11-17)
+
+
+### Features
+
+* **config:** per-scale-set extra_args for the docker backend ([#6](https://github.com/emon5122/scalerunnergh/issues/6)) ([e856603](https://github.com/emon5122/scalerunnergh/commit/e85660358c0d981e0c8f4f8b77a442eae759781c))
+* **docker:** per-scale-set image pull policy ([#8](https://github.com/emon5122/scalerunnergh/issues/8)) ([f8b55dd](https://github.com/emon5122/scalerunnergh/commit/f8b55dd4a9cb89f3893457d66098d09afa5d840b))
+
 ## [1.3.0](https://github.com/emon5122/scalerunnergh/compare/v1.2.0...v1.3.0) (2026-11-12)
 
 
