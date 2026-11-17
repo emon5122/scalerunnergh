@@ -337,6 +337,26 @@ Pulls of one image never run twice at once: callers that waited for a pull in fl
 take its result. Pulls use the daemon's own credentials (`docker login` of the service
 user), so public images need nothing.
 
+#### Private registries
+
+`docker.registry_auth` gives one registry a pull credential without a `docker login` on
+the host:
+
+```json
+"docker": {"registry_auth": [
+  {"registry": "ghcr.io", "username": "my-user", "password_file": "/etc/scalerunnergh/ghcr-read.pat"}
+]}
+```
+
+Every pull of an image on that registry (any pull policy) runs with a private, temporary
+docker config that holds only this credential and is removed right after; the token is
+read from `password_file` (a `read:packages` PAT for ghcr.io) and never reaches a command
+line or a log. `docker create` gets `--pull never` for these images, and an image the host
+does not have yet is pulled with the credential before the first runner starts, so no
+anonymous pull is ever tried. The daemon endpoint is pinned with `-H` (`DOCKER_HOST` or
+the current docker context); a `tcp://` endpoint is refused for authenticated pulls.
+GitHub App installation tokens do not work for ghcr.io packages; use a PAT.
+
 When a pull brings a new image (a new image id for the tag), the old images of that
 repository that are now dangling are removed: only images whose `RepoDigests` name the
 same repository, never one any container (running or stopped) was created from, and with
