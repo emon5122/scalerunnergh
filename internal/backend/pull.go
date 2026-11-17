@@ -2,10 +2,16 @@ package backend
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/emon5122/scalerunnergh/internal/config"
 )
 
 // Image pulls for the "always" and "interval:<d>" pull policies. A pull never
@@ -92,7 +98,7 @@ func (d *Docker) pullShared(ctx context.Context, image string, asyncPrune bool) 
 
 func (d *Docker) pull(ctx context.Context, image string, asyncPrune bool) error {
 	before, _ := d.imageID(ctx, image) // "" when the host does not have it yet
-	if _, err := d.run(ctx, nil, "pull", "-q", image); err != nil {
+	if err := d.pullImage(ctx, image); err != nil {
 		return err
 	}
 	after, err := d.imageID(ctx, image)
@@ -114,6 +120,72 @@ func (d *Docker) pull(ctx context.Context, image string, asyncPrune bool) error 
 		d.pruneOld(pctx, image, after)
 	})
 	return nil
+}
+
+// pullImage runs docker pull; for an image on a registry with registry_auth, with a private temporary docker config
+// that holds only that credential (removed right after) and the daemon endpoint pinned with -H, because a temporary
+// --config has no context store. The password never reaches an argv, the environment or a log.
+func (d *Docker) pullImage(ctx context.Context, image string) error {
+	a := d.cfg.AuthFor(image)
+	if a == nil {
+		_, err := d.run(ctx, nil, "pull", "-q", image)
+		return err
+	}
+	pw, err := config.ReadSecretFile(a.PasswordFile)
+	if err != nil {
+		return fmt.Errorf("registry_auth for %s: %w", a.Registry, err)
+	}
+	host, err := d.endpoint(ctx)
+	if err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp("", "srg-pull-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	cfg := map[string]any{"auths": map[string]any{a.Registry: map[string]string{
+		"auth": base64.StdEncoding.EncodeToString([]byte(a.Username + ":" + pw))}}}
+	b, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), b, 0o600); err != nil {
+		return err
+	}
+	args := []string{"--config", dir}
+	if host != "" {
+		args = append(args, "-H", host)
+	}
+	_, err = d.run(ctx, nil, append(args, "pull", "-q", image)...)
+	return err
+}
+
+// endpoint is the daemon the docker CLI talks to with the user's normal config, resolved once: DOCKER_HOST, else
+// the current context's endpoint, else "" (the default socket). A tcp endpoint is refused for authed pulls: its TLS
+// material lives in the context store a temporary --config does not have.
+func (d *Docker) endpoint(ctx context.Context) (string, error) {
+	d.endpointOnce.Do(func() {
+		h := os.Getenv("DOCKER_HOST")
+		if h == "" {
+			h, _ = d.run(ctx, nil, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
+		}
+		d.endpointVal = strings.TrimSpace(h)
+	})
+	if strings.HasPrefix(d.endpointVal, "tcp://") {
+		return "", fmt.Errorf("registry_auth needs a local docker endpoint (unix socket), not %s", d.endpointVal)
+	}
+	return d.endpointVal, nil
+}
+
+// ensureImage pulls image (with its registry credential, under the shared per-image lock) when the host does not
+// have it yet: docker create gets --pull never for registry_auth images, so it never pulls them anonymously.
+func (d *Docker) ensureImage(ctx context.Context, image string) {
+	if id, err := d.imageID(ctx, image); err == nil && id != "" {
+		return
+	}
+	pctx, cancel := context.WithTimeout(ctx, backgroundPullTimeout) // a cold CI image is large
+	defer cancel()
+	if err := d.pullShared(pctx, image, true); err != nil {
+		d.logger().Warn("image pull failed and the host has no copy; the runner cannot start", "image", image, "error", err)
+	}
 }
 
 func (d *Docker) imageID(ctx context.Context, image string) (string, error) {

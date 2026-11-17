@@ -192,6 +192,38 @@ type DockerBackendConfig struct {
 	RegistryMirror string `json:"registry_mirror,omitempty"`
 	// ExtraArgs are appended to docker create (escape hatch).
 	ExtraArgs []string `json:"extra_args,omitempty"`
+	// RegistryAuth gives pulls from a private registry a credential: every pull of an image on one of these
+	// registries runs with a private, temporary docker config holding it, and docker create never pulls such an
+	// image itself (--pull never). The password (a token) is read from a file; it never reaches an argv or a log.
+	RegistryAuth []RegistryAuth `json:"registry_auth,omitempty"`
+}
+
+// RegistryAuth is one registry's pull credential (e.g. ghcr.io with a read:packages token).
+type RegistryAuth struct {
+	Registry     string `json:"registry"`
+	Username     string `json:"username"`
+	PasswordFile string `json:"password_file"`
+}
+
+// RegistryOf returns the registry host of an image reference ("ghcr.io/o/i:t" -> "ghcr.io"; Docker Hub images,
+// which have no host part, -> "docker.io").
+func RegistryOf(image string) string {
+	first, _, ok := strings.Cut(image, "/")
+	if !ok || (!strings.ContainsAny(first, ".:") && first != "localhost") {
+		return "docker.io"
+	}
+	return first
+}
+
+// AuthFor returns the credential for image's registry, or nil.
+func (d DockerBackendConfig) AuthFor(image string) *RegistryAuth {
+	reg := RegistryOf(image)
+	for i := range d.RegistryAuth {
+		if d.RegistryAuth[i].Registry == reg {
+			return &d.RegistryAuth[i]
+		}
+	}
+	return nil
 }
 
 // NativeBackendConfig holds native (process) backend settings.
@@ -316,6 +348,19 @@ func (c *Config) Validate() error {
 	if c.Docker.Binary == "" {
 		c.Docker.Binary = "docker"
 	}
+	seenReg := map[string]bool{}
+	for _, a := range c.Docker.RegistryAuth {
+		if a.Registry == "" || strings.ContainsAny(a.Registry, "/ ") || a.Username == "" || a.PasswordFile == "" || seenReg[a.Registry] {
+			return errors.New("config: docker.registry_auth entries need a unique registry host, a username and a password_file")
+		}
+		if !filepath.IsAbs(a.PasswordFile) {
+			return errors.New("config: docker.registry_auth password_file must be an absolute path")
+		}
+		seenReg[a.Registry] = true
+	}
+	if len(c.Docker.RegistryAuth) > 0 && hasPullArg(c.Docker.ExtraArgs) {
+		return errors.New("config: docker.extra_args must not set --pull together with docker.registry_auth")
+	}
 	if c.Metrics.Address == "" {
 		c.Metrics.Address = ":9090"
 	}
@@ -373,6 +418,9 @@ func (c *Config) Validate() error {
 			}
 			if _, err := ParsePull(s.Pull); err != nil {
 				return fmt.Errorf("%s: %w", where, err)
+			}
+			if c.Docker.AuthFor(s.Image) != nil && hasPullArg(s.ExtraArgs) {
+				return fmt.Errorf("%s: extra_args must not set --pull for an image with registry_auth", where)
 			}
 		case BackendNative:
 			usesNative = true
@@ -500,6 +548,16 @@ func ParseGitHubURL(raw string) (owner, repo string, err error) {
 	default:
 		return "", "", fmt.Errorf("url %q must be https://github.com/<org>[/<repo>]", raw)
 	}
+}
+
+// hasPullArg: a docker create --pull flag in args (both "--pull x" and "--pull=x").
+func hasPullArg(args []string) bool {
+	for _, a := range args {
+		if a == "--pull" || strings.HasPrefix(a, "--pull=") {
+			return true
+		}
+	}
+	return false
 }
 
 // ReadSecretFile reads a credential file and trims surrounding whitespace.

@@ -1,6 +1,6 @@
 # Private image pulls with the scale set's GitHub App (titli-hub card #1064)
 
-Status: plan v3, DONE (2026-11-18): goldfish round 3 had no P0/P1.
+Status: plan v4, DONE (2026-11-18): goldfish round 3 had no P0/P1; v4 = the credential source after the step-0 proof.
 
 ## Need
 rl9's `srg-rl9-nexis` scale set should run the private `ghcr.io/nexisltd/titli-ci-runner:main` image. rl9 has no ghcr
@@ -82,3 +82,14 @@ App: the cred map uses the scale set's pull token source.
   token refreshes when under `backgroundPullTimeout` remains; a TLS docker endpoint is refused (a temp `--config` has no
   certs); the temp dir is `os.MkdirTemp("")` with 0700 (no named state dir exists); the `--pull=...` form is refused too;
   the PAT fallback gets its own short design if step 0 fails; the pull holds the pool slot as today.
+
+## v4: step 0 result and what was built
+Step 0 (Titli, 18 Nov): the App installation token with packages:read was minted, but ghcr answered 403 on the
+manifest: ghcr.io does not honour GitHub App installation tokens for this private package. A classic PAT
+(read:packages, Bitwarden "ghcr-read-pat-titli-ci") works (manifest HEAD 200). So the credential source is a PAT file,
+and since a registry credential is per host and registry (not per scale set), it moved to the docker backend:
+`docker.registry_auth: [{registry, username, password_file}]`. Everything else from v3 is unchanged and built: the
+temporary 0700 `--config` dir with only that credential (removed right after), `-H` with the endpoint resolved once
+(tcp:// refused), `--pull never` on create for those images, an authed pull of a missing image before the first start
+under the shared per-image lock with backgroundPullTimeout, `--pull` in extra_args refused, error labels name the
+subcommand. The App-token parts (AppToken permissions, the image -> credential map through the scaler) are dropped.

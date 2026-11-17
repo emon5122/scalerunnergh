@@ -30,6 +30,9 @@ type Docker struct {
 
 	pullsMu sync.Mutex
 	pulls   map[string]*imagePull
+	// endpointOnce/endpointVal: the daemon endpoint for authed pulls (pull.go endpoint)
+	endpointOnce sync.Once
+	endpointVal  string
 	// bg tracks background image prunes (tests wait for them).
 	bg sync.WaitGroup
 }
@@ -54,9 +57,22 @@ func (d *Docker) exec(ctx context.Context, stdin []byte, args ...string) (string
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("docker %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("docker %s: %w: %s", subcommand(args), err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// subcommand is the docker subcommand of args, past the global flags an authed pull puts in front.
+func subcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--config", "-H":
+			i++
+		default:
+			return args[i]
+		}
+	}
+	return ""
 }
 
 // CreateArgs builds the docker create arguments. The JIT config is not in them.
@@ -109,6 +125,9 @@ func (d *Docker) CreateArgs(spec RunnerSpec) []string {
 	}
 	args = append(args, d.cfg.ExtraArgs...)
 	args = append(args, spec.ExtraArgs...)
+	if d.cfg.AuthFor(spec.Image) != nil {
+		args = append(args, "--pull", "never") // a registry_auth image is pulled only with its credential
+	}
 	return append(args, spec.Image)
 }
 
@@ -119,6 +138,9 @@ func (d *Docker) Start(ctx context.Context, spec RunnerSpec) (Handle, error) {
 	h := Handle{ID: spec.Name, Name: spec.Name}
 	if spec.PullAlways {
 		d.pullBeforeStart(ctx, spec.Image)
+	}
+	if d.cfg.AuthFor(spec.Image) != nil {
+		d.ensureImage(ctx, spec.Image)
 	}
 	if _, err := d.run(ctx, nil, d.CreateArgs(spec)...); err != nil {
 		// A failed create can still leave a container behind (e.g. created, then a late error).

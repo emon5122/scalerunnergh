@@ -261,3 +261,32 @@ func TestScaleSetPull(t *testing.T) {
 		t.Fatalf("native with pull: %v", err)
 	}
 }
+
+func TestDockerRegistryAuth(t *testing.T) {
+	with := func(auth, image, extra string) string {
+		s := strings.Replace(validDocker, `"host": {`, `"docker": {"registry_auth": [`+auth+`]}, "host": {`, 1)
+		return strings.Replace(s, `"image": "img:1"`, `"image": "`+image+`"`+extra, 1)
+	}
+	good := `{"registry": "ghcr.io", "username": "emon5122", "password_file": "/etc/srg/ghcr.pat"}`
+	cfg, err := Parse([]byte(with(good, "ghcr.io/nexisltd/titli-ci-runner:main", "")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := cfg.Docker.AuthFor("ghcr.io/nexisltd/titli-ci-runner:main"); a == nil || a.Username != "emon5122" {
+		t.Fatalf("AuthFor: %+v", a)
+	}
+	if cfg.Docker.AuthFor("img:1") != nil {
+		t.Fatal("a Docker Hub image got the ghcr credential")
+	}
+	for name, bad := range map[string]string{
+		"relative file": with(`{"registry": "ghcr.io", "username": "u", "password_file": "pat"}`, "img:1", ""),
+		"no username":   with(`{"registry": "ghcr.io", "password_file": "/p"}`, "img:1", ""),
+		"path registry": with(`{"registry": "ghcr.io/x", "username": "u", "password_file": "/p"}`, "img:1", ""),
+		"duplicate":     with(good+","+good, "img:1", ""),
+		"--pull extra":  with(good, "ghcr.io/o/i:1", `, "extra_args": ["--pull=always"]`),
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
