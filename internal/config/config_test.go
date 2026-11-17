@@ -193,3 +193,22 @@ func TestNativeRunAsValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestScaleSetExtraArgs(t *testing.T) {
+	cfg, err := Parse([]byte(strings.Replace(validDocker, `"image": "img:1"`, `"image": "img:1", "extra_args": ["-v", "c:/cache:ro"]`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.ScaleSets[0].ExtraArgs, " "); got != "-v c:/cache:ro" {
+		t.Fatalf("extra_args = %q", got)
+	}
+	native := strings.Replace(validDocker, `"image": "img:1"`, `"extra_args": ["-v", "c:/cache:ro"]`, 1)
+	native = strings.Replace(native, `"backend": "docker"`, `"backend": "native"`, 1)
+	native = strings.Replace(native, `"dind": true`, `"dind": false`, 1)
+	if strings.Contains(native, `"image"`) || strings.Contains(native, `"dind": true`) {
+		t.Fatal("test bug: the native config still has another docker-backend setting")
+	}
+	if _, err := Parse([]byte(native)); err == nil || !strings.Contains(err.Error(), "docker-backend settings") {
+		t.Fatalf("native with extra_args: %v", err)
+	}
+}
