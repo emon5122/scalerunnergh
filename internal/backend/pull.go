@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -18,14 +17,31 @@ var (
 	alwaysPullTimeout = 5 * time.Minute
 	// backgroundPullTimeout caps an interval pull.
 	backgroundPullTimeout = 30 * time.Minute
+	// pruneTimeout caps an image prune that runs off the runner start path.
+	pruneTimeout = 5 * time.Minute
 )
 
-// imagePull serialises the pulls of one image ref.
+// imagePull serialises the pulls of one image ref. lock is a one-slot
+// semaphore rather than a sync.Mutex so that a waiter gives up when its ctx
+// ends: an "always" start must not queue for up to backgroundPullTimeout
+// behind a slow interval pull of the same image.
 type imagePull struct {
-	mu   sync.Mutex
-	done time.Time // when the last pull finished
-	err  error     // and its result
+	lock chan struct{}
+	done time.Time // when the last pull finished (guarded by lock)
+	err  error     // and its result (guarded by lock)
 }
+
+// acquire takes the image lock, or returns the ctx error when ctx ends first.
+func (p *imagePull) acquire(ctx context.Context) error {
+	select {
+	case p.lock <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *imagePull) release() { <-p.lock }
 
 func (d *Docker) logger() *slog.Logger {
 	if d.Logger != nil {
@@ -42,7 +58,7 @@ func (d *Docker) imagePull(image string) *imagePull {
 	}
 	p := d.pulls[image]
 	if p == nil {
-		p = &imagePull{}
+		p = &imagePull{lock: make(chan struct{}, 1)}
 		d.pulls[image] = p
 	}
 	return p
@@ -51,21 +67,30 @@ func (d *Docker) imagePull(image string) *imagePull {
 // Pull pulls image and, when that brought a new image, prunes the dangling
 // images of the same repository that no container uses. Concurrent callers
 // share one pull: whoever waited for a pull that finished after it asked
-// takes that result instead of pulling again.
+// takes that result instead of pulling again. A caller whose ctx ends while
+// it waits for another caller's pull gets the ctx error.
 func (d *Docker) Pull(ctx context.Context, image string) error {
+	return d.pullShared(ctx, image, false)
+}
+
+// pullShared is Pull; with asyncPrune the prune runs in the background
+// instead of before it returns.
+func (d *Docker) pullShared(ctx context.Context, image string, asyncPrune bool) error {
 	asked := time.Now()
 	p := d.imagePull(image)
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	if err := p.acquire(ctx); err != nil {
+		return err
+	}
+	defer p.release()
 	if p.done.After(asked) {
 		return p.err
 	}
-	p.err = d.pull(ctx, image)
+	p.err = d.pull(ctx, image, asyncPrune)
 	p.done = time.Now()
 	return p.err
 }
 
-func (d *Docker) pull(ctx context.Context, image string) error {
+func (d *Docker) pull(ctx context.Context, image string, asyncPrune bool) error {
 	before, _ := d.imageID(ctx, image) // "" when the host does not have it yet
 	if _, err := d.run(ctx, nil, "pull", "-q", image); err != nil {
 		return err
@@ -75,9 +100,19 @@ func (d *Docker) pull(ctx context.Context, image string) error {
 		return nil // nothing new (or cannot tell): nothing to prune
 	}
 	d.logger().Info("pulled a new image", "image", image, "id", after, "previous", before)
-	if before != "" {
-		d.pruneOld(ctx, image, after)
+	if before == "" {
+		return nil
 	}
+	if !asyncPrune {
+		d.pruneOld(ctx, image, after)
+		return nil
+	}
+	// Off the runner start path, and not bound to the start's ctx.
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pruneTimeout)
+	d.bg.Go(func() {
+		defer cancel()
+		d.pruneOld(pctx, image, after)
+	})
 	return nil
 }
 
@@ -192,11 +227,14 @@ func overlaps(a, b map[string]bool) bool {
 }
 
 // pullBeforeStart is the "always" policy: pull, and on failure warn and go on
-// with the local image.
+// with the local image. alwaysPullTimeout also covers the wait for another
+// pull of the same image (e.g. a slow interval pull from another scale set),
+// so a start never waits longer than that. When the pull brought a new image,
+// the old ones are pruned in the background.
 func (d *Docker) pullBeforeStart(ctx context.Context, image string) {
 	pctx, cancel := context.WithTimeout(ctx, alwaysPullTimeout)
 	defer cancel()
-	if err := d.Pull(pctx, image); err != nil {
+	if err := d.pullShared(pctx, image, true); err != nil {
 		d.logger().Warn("image pull failed, starting the runner from the local image", "image", image, "error", err)
 	}
 }

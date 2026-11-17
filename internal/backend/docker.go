@@ -30,6 +30,8 @@ type Docker struct {
 
 	pullsMu sync.Mutex
 	pulls   map[string]*imagePull
+	// bg tracks background image prunes (tests wait for them).
+	bg sync.WaitGroup
 }
 
 // NewDocker creates the docker backend for a host.

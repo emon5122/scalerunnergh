@@ -194,7 +194,7 @@ func TestPullSharesConcurrentPulls(t *testing.T) {
 	d := dockerWith(f)
 	// Hold the image lock so that every caller below queues behind one pull.
 	p := d.imagePull(testImage)
-	p.mu.Lock()
+	_ = p.acquire(context.Background())
 	var wg sync.WaitGroup
 	for range 5 {
 		wg.Add(1)
@@ -207,17 +207,108 @@ func TestPullSharesConcurrentPulls(t *testing.T) {
 	// A pull that finished after all of them asked (in the future, so a
 	// goroutine scheduled late still counts as having asked before it).
 	p.done = time.Now().Add(time.Hour)
-	p.mu.Unlock()
+	p.release()
 	wg.Wait()
 	if n := f.count("pull"); n != 0 {
 		t.Fatalf("callers that waited for a finished pull must share it, got %d pulls", n)
 	}
 	// A caller that asks after the last pull finished pulls again.
-	p.mu.Lock()
+	_ = p.acquire(context.Background())
 	p.done = time.Now().Add(-time.Second)
-	p.mu.Unlock()
+	p.release()
 	if err := d.Pull(context.Background(), testImage); err != nil || f.count("pull") != 1 {
 		t.Fatalf("later pull: %v, %d pulls", err, f.count("pull"))
+	}
+}
+
+// An "always" start must not queue behind a slow pull of the same image held
+// by another caller (an interval pull of another scale set): it stops waiting
+// after alwaysPullTimeout and starts from the local image.
+func TestPullAlwaysDoesNotWaitBehindABackgroundPull(t *testing.T) {
+	f := newFakeDaemon()
+	f.tags[testImage] = "sha256:local"
+	f.digests["sha256:local"] = []string{"ghcr.io/acme/ci-runner@sha256:d-local"}
+	f.remote[testImage] = "sha256:new"
+	d := dockerWith(f)
+	saved := alwaysPullTimeout
+	alwaysPullTimeout = 50 * time.Millisecond
+	defer func() { alwaysPullTimeout = saved }()
+
+	// A background pull that hangs in docker pull while it holds the image lock.
+	inner := f.run
+	inPull, unblock := make(chan struct{}), make(chan struct{})
+	d.run = func(ctx context.Context, stdin []byte, args ...string) (string, error) {
+		if args[0] == "pull" {
+			close(inPull)
+			<-unblock
+		}
+		return inner(ctx, stdin, args...)
+	}
+	bgDone := make(chan error, 1)
+	go func() { bgDone <- d.Pull(context.Background(), testImage) }()
+	<-inPull
+
+	sp := spec()
+	sp.Image, sp.PullAlways = testImage, true
+	started := time.Now()
+	h, err := d.Start(context.Background(), sp)
+	took := time.Since(started)
+	close(unblock)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if took > 2*time.Second {
+		t.Fatalf("an always start waited %v behind a background pull (timeout %v)", took, alwaysPullTimeout)
+	}
+	if f.containers[h.ID] != "sha256:local" {
+		t.Fatalf("runner not created from the local image: %v", f.containers)
+	}
+	if err := <-bgDone; err != nil {
+		t.Fatalf("background pull: %v", err)
+	}
+	if n := f.count("pull"); n != 1 {
+		t.Fatalf("the always start must not have pulled itself, got %d pulls", n)
+	}
+}
+
+// On "always" the prune of a new image's old ones runs off the start path.
+func TestPullAlwaysPrunesInTheBackground(t *testing.T) {
+	f := newFakeDaemon()
+	f.tags[testImage] = "sha256:v1"
+	f.digests["sha256:v1"] = []string{"ghcr.io/acme/ci-runner@sha256:d-v1"}
+	f.remote[testImage] = "sha256:v2"
+	d := dockerWith(f)
+	inner := f.run
+	inPrune, unblock := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	d.run = func(ctx context.Context, stdin []byte, args ...string) (string, error) {
+		if args[0] == "images" {
+			once.Do(func() { close(inPrune) })
+			<-unblock
+		}
+		return inner(ctx, stdin, args...)
+	}
+	sp := spec()
+	sp.Image, sp.PullAlways = testImage, true
+	startDone := make(chan error, 1)
+	go func() {
+		_, err := d.Start(context.Background(), sp)
+		startDone <- err
+	}()
+	select {
+	case err := <-startDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		close(unblock)
+		t.Fatal("the runner start waited for the image prune")
+	}
+	<-inPrune
+	close(unblock)
+	d.bg.Wait()
+	if _, ok := f.digests["sha256:v1"]; ok {
+		t.Fatalf("old image not pruned in the background: %q", f.calls)
 	}
 }
 
