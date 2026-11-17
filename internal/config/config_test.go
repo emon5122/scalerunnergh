@@ -212,3 +212,52 @@ func TestScaleSetExtraArgs(t *testing.T) {
 		t.Fatalf("native with extra_args: %v", err)
 	}
 }
+
+func TestParsePull(t *testing.T) {
+	for in, want := range map[string]PullPolicy{
+		"":               {Mode: PullMissing},
+		"missing":        {Mode: PullMissing},
+		"always":         {Mode: PullAlways},
+		"interval:30m":   {Mode: PullInterval, Interval: 30 * time.Minute},
+		"interval:1h30m": {Mode: PullInterval, Interval: 90 * time.Minute},
+	} {
+		got, err := ParsePull(in)
+		if err != nil || got != want {
+			t.Errorf("ParsePull(%q) = %+v, %v; want %+v", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"Always", "never", "interval", "interval:", "interval:abc", "interval:10s", "interval:-5m", "30m"} {
+		if _, err := ParsePull(bad); err == nil {
+			t.Errorf("ParsePull(%q) must fail", bad)
+		}
+	}
+}
+
+func TestScaleSetPull(t *testing.T) {
+	with := func(pull string) string {
+		return strings.Replace(validDocker, `"image": "img:1"`, `"image": "img:1", "pull": "`+pull+`"`, 1)
+	}
+	cfg, err := Parse([]byte(validDocker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := cfg.ScaleSets[0].PullPolicy(); p.Mode != PullMissing {
+		t.Fatalf("default pull policy = %+v, want missing", p)
+	}
+	cfg, err = Parse([]byte(with("interval:30m")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := cfg.ScaleSets[0].PullPolicy(); p.Mode != PullInterval || p.Interval != 30*time.Minute {
+		t.Fatalf("pull policy = %+v", p)
+	}
+	if _, err := Parse([]byte(with("sometimes"))); err == nil || !strings.Contains(err.Error(), "pull") {
+		t.Fatalf("bad pull policy accepted: %v", err)
+	}
+	native := strings.Replace(validDocker, `"image": "img:1"`, `"pull": "always"`, 1)
+	native = strings.Replace(native, `"backend": "docker"`, `"backend": "native"`, 1)
+	native = strings.Replace(native, `"dind": true`, `"dind": false`, 1)
+	if _, err := Parse([]byte(native)); err == nil || !strings.Contains(err.Error(), "docker-backend settings") {
+		t.Fatalf("native with pull: %v", err)
+	}
+}

@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/emon5122/scalerunnergh/internal/config"
@@ -23,6 +25,13 @@ type Docker struct {
 	host string
 	// run executes the docker CLI; tests replace it.
 	run func(ctx context.Context, stdin []byte, args ...string) (string, error)
+	// Logger gets pull warnings and image prunes (nil discards them).
+	Logger *slog.Logger
+
+	pullsMu sync.Mutex
+	pulls   map[string]*imagePull
+	// bg tracks background image prunes (tests wait for them).
+	bg sync.WaitGroup
 }
 
 // NewDocker creates the docker backend for a host.
@@ -103,11 +112,14 @@ func (d *Docker) CreateArgs(spec RunnerSpec) []string {
 	return append(args, spec.Image)
 }
 
-// Start implements Backend: create, copy the JIT config in as a file, start.
+// Start implements Backend: (pull,) create, copy the JIT config in as a file, start.
 func (d *Docker) Start(ctx context.Context, spec RunnerSpec) (Handle, error) {
 	// The container is addressed by its unique name from here on, never by
 	// parsed CLI output.
 	h := Handle{ID: spec.Name, Name: spec.Name}
+	if spec.PullAlways {
+		d.pullBeforeStart(ctx, spec.Image)
+	}
 	if _, err := d.run(ctx, nil, d.CreateArgs(spec)...); err != nil {
 		// A failed create can still leave a container behind (e.g. created, then a late error).
 		_ = d.Stop(context.WithoutCancel(ctx), h)

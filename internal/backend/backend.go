@@ -27,6 +27,9 @@ type RunnerSpec struct {
 	Limits config.Limits
 	// ExtraArgs of the scale set, appended to docker create after the backend's (docker backend).
 	ExtraArgs []string
+	// PullAlways pulls Image before the runner starts (docker backend, pull
+	// policy "always"). A failed pull falls back to the local image.
+	PullAlways bool
 }
 
 // Handle identifies a started runner inside its backend.

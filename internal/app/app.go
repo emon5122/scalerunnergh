@@ -59,8 +59,11 @@ func New(cfg *config.Config, version string, logger *slog.Logger, met *metrics.C
 func (a *App) Run(ctx context.Context) error {
 	cfg := a.Config
 	backends := map[string]backend.Backend{}
+	var docker *backend.Docker
 	if cfg.UsesBackend(config.BackendDocker) {
-		backends[config.BackendDocker] = backend.NewDocker(cfg.Docker, cfg.Host.Name)
+		docker = backend.NewDocker(cfg.Docker, cfg.Host.Name)
+		docker.Logger = a.Logger
+		backends[config.BackendDocker] = docker
 	}
 	if cfg.UsesBackend(config.BackendNative) {
 		n := backend.NewNative(cfg.Native, a.Logger)
@@ -100,6 +103,17 @@ func (a *App) Run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			svc.run(runCtx)
+		}()
+	}
+
+	// Background pulls for "interval:<d>" scale sets: one loop per image, at
+	// the shortest interval any scale set asks for. They stop with ctx.
+	for image, every := range pullIntervals(cfg) {
+		a.Logger.Info("pulling image in the background", "image", image, "every", every)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			docker.PullLoop(ctx, image, every)
 		}()
 	}
 
@@ -143,6 +157,22 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// pullIntervals maps each image of a docker scale set with an interval pull
+// policy to the shortest interval asked for it.
+func pullIntervals(cfg *config.Config) map[string]time.Duration {
+	out := map[string]time.Duration{}
+	for _, ss := range cfg.ScaleSets {
+		p := ss.PullPolicy()
+		if ss.Backend != config.BackendDocker || p.Mode != config.PullInterval {
+			continue
+		}
+		if cur, ok := out[ss.Image]; !ok || p.Interval < cur {
+			out[ss.Image] = p.Interval
+		}
+	}
+	return out
 }
 
 // drainSettle is how long idle runners get to pick up an already assigned job

@@ -239,6 +239,7 @@ One JSON file per host. Unknown fields are errors. Validate with
 | `min_runners` / `max_runners` | Idle runners kept ready / cap for this scale set |
 | `heavy` | Counts against `host.max_heavy` |
 | `image`, `dind` | Docker backend: runner image, private dockerd inside the job container |
+| `pull` | Docker backend: image pull policy, `missing` (default), `always` or `interval:<duration>`. See [Image updates](#image-updates) |
 | `limits` | `cpus`, `memory_mb`, `pids`, `cpu_shares`, `blkio_weight`, `oom_score_adj`, `storage_opt_size`, `gpus` (docker); `nice` (native) |
 | `allow_repos` | Optional list of repos allowed to use this scale set |
 | `auth` | Overrides the host-level `auth` |
@@ -315,6 +316,33 @@ flavor `sudo` is a shim that grants nothing: `sudo apt-get install X` passes onl
 already in the image, apt maintenance commands are skipped (removals and upgrades with a
 warning), and anything else runs as the job user.
 The images only start through ScaleRunnerGH (the entrypoint needs the JIT config file).
+
+### Image updates
+
+By default (`"pull": "missing"`) a host pulls an image only when it does not have it,
+so a moving tag such as `:main` stays at whatever the host pulled first. Set `pull` on
+the scale set to follow it:
+
+| `pull` | Behaviour |
+|---|---|
+| `missing` | Default. Never re-pull a tag the host already has |
+| `always` | Pull before every runner start. If the pull fails (registry down, timeout after 5 minutes), the runner starts from the local image and a warning is logged; a job is never blocked by a pull |
+| `interval:<duration>` | Pull in the background at start-up and then every `<duration>` (Go duration, at least `1m`, e.g. `interval:30m`). Runners always start from the local image. Failures are logged and retried at the next tick. Scale sets sharing an image share one loop at the shortest interval |
+
+```json
+{"name": "srg-ci", "backend": "docker", "image": "ghcr.io/my-org/ci-runner:main", "pull": "interval:30m"}
+```
+
+Pulls of one image never run twice at once: callers that waited for a pull in flight
+take its result. Pulls use the daemon's own credentials (`docker login` of the service
+user), so public images need nothing.
+
+When a pull brings a new image (a new image id for the tag), the old images of that
+repository that are now dangling are removed: only images whose `RepoDigests` name the
+same repository, never one any container (running or stopped) was created from, and with
+`docker rmi` without `-f`, so the daemon refuses anything still in use. Images still in
+use are retried after the next new pull. If the containers cannot be listed, nothing is
+removed.
 
 ## Metrics
 

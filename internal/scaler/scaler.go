@@ -414,13 +414,14 @@ func (s *Scaler) start(ctx context.Context, slot *pool.Slot) (*runnerState, erro
 		runnerID = int64(jit.Runner.ID)
 	}
 	h, err := s.o.Backend.Start(ctx, backend.RunnerSpec{
-		Name:      name,
-		ScaleSet:  s.o.ScaleSet.Name,
-		JITConfig: jit.EncodedJITConfig,
-		Image:     s.o.ScaleSet.Image,
-		DinD:      s.o.ScaleSet.DinD,
-		Limits:    s.o.ScaleSet.Limits,
-		ExtraArgs: s.o.ScaleSet.ExtraArgs,
+		Name:       name,
+		ScaleSet:   s.o.ScaleSet.Name,
+		JITConfig:  jit.EncodedJITConfig,
+		Image:      s.o.ScaleSet.Image,
+		DinD:       s.o.ScaleSet.DinD,
+		Limits:     s.o.ScaleSet.Limits,
+		ExtraArgs:  s.o.ScaleSet.ExtraArgs,
+		PullAlways: s.o.ScaleSet.PullPolicy().Mode == config.PullAlways,
 	})
 	if err != nil {
 		if runnerID != 0 {

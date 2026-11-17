@@ -848,3 +848,17 @@ func TestRunnerNameFitsLimit(t *testing.T) {
 		t.Fatal("names must be unique")
 	}
 }
+
+func TestPullPolicyReachesTheBackend(t *testing.T) {
+	for pull, always := range map[string]bool{"": false, "missing": false, "always": true, "interval:30m": false} {
+		r := newRig(pool.New(10, 0, nil), config.ScaleSetConfig{MaxRunners: 1, Image: "img", Pull: pull}, nil)
+		r.s.Scale(context.Background(), stats(1))
+		if alive(r.s) != 1 {
+			t.Fatalf("pull %q: no runner started", pull)
+		}
+		if got := r.b.started[0].PullAlways; got != always {
+			t.Errorf("pull %q: PullAlways = %v, want %v", pull, got, always)
+		}
+		r.s.Close(context.Background())
+	}
+}
