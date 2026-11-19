@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0](https://github.com/emon5122/scalerunnergh/compare/v1.4.0...v1.5.0) (2026-11-19)
+
+
+### Features
+
+* **docker:** registry_auth for private image pulls (token file, temp docker config) ([#9](https://github.com/emon5122/scalerunnergh/issues/9)) ([13601c9](https://github.com/emon5122/scalerunnergh/commit/13601c94b43368df94ef801d2b2b2d2c6393f5c3))
+* self-cleanup gc (images, build cache, native job dirs, disk pressure) + BuildKit GC daemon.json ([#11](https://github.com/emon5122/scalerunnergh/issues/11)) ([5daa3b7](https://github.com/emon5122/scalerunnergh/commit/5daa3b78f7c8ae682cb373e79ab03047f8aef52e))
+
 ## [1.4.0](https://github.com/emon5122/scalerunnergh/compare/v1.3.0...v1.4.0) (2026-11-17)
 
 
