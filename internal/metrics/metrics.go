@@ -25,6 +25,13 @@ const (
 	HostSlotsUsed    = "scalerunner_host_slots_used"
 	HostSlotsMax     = "scalerunner_host_slots_max"
 	HostPaused       = "scalerunner_host_paused"
+
+	GCRuns          = "scalerunner_gc_runs_total"
+	GCErrors        = "scalerunner_gc_errors_total"
+	GCImagesRemoved = "scalerunner_gc_images_removed_total"
+	GCBytesFreed    = "scalerunner_gc_bytes_freed_estimate_total"
+	GCImagesBytes   = "scalerunner_gc_images_bytes"
+	DiskPressure    = "scalerunner_disk_pressure"
 )
 
 var help = map[string]string{
@@ -41,6 +48,12 @@ var help = map[string]string{
 	HostSlotsUsed:    "Host slots in use",
 	HostSlotsMax:     "Host slots (host.max_runners)",
 	HostPaused:       "1 while the kill switch is on",
+	GCRuns:           "gc runs",
+	GCErrors:         "gc runs that ended with an error",
+	GCImagesRemoved:  "Images the gc removed",
+	GCBytesFreed:     "Bytes the gc freed (estimate: image sizes overcount shared layers)",
+	GCImagesBytes:    "Total size of the images on the docker daemon at the last gc run",
+	DiskPressure:     "1 while a gc disk path has less free space than gc.min_free_disk_percent",
 }
 
 // Collector stores metric values.

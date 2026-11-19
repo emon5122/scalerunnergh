@@ -21,6 +21,12 @@
       "limits": { "cpus": 2, "memory_mb": 4096, "pids": 4096 }
     }
   ],
+  "gc": {
+    "interval": "1h",
+    "image_max_age": "168h",
+    "images_max_bytes": "30GB",
+    "build_cache_max_bytes": "10GB"
+  },
   "metrics": { "enabled": true, "address": ":9090" },
   "log_level": "info"
 }

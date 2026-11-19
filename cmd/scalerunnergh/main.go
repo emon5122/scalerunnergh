@@ -103,7 +103,7 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", met.Handler())
 		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, "ok")
+			fmt.Fprint(w, a.Health())
 		})
 		mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")

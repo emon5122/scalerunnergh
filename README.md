@@ -59,6 +59,9 @@ for the runner scale set API.
   runner release pinned by version and sha256 (native mode).
 - **Safe restarts**: leftovers of an earlier process are removed at start; on shutdown
   running jobs may finish (`drain_timeout`).
+- **Cleans up after itself** (optional `gc` block): unused images by age and a total-size cap, the build cache,
+  leftover native job dirs, and a disk-space check, on its own timer; failures and disk pressure show in
+  `/status` and `/health`.
 - **PAT or GitHub App** credentials, read from files, never from the config or the
   environment.
 - **Prometheus metrics** and a Grafana dashboard.
@@ -257,6 +260,60 @@ One JSON file per host. Unknown fields are errors. Validate with
 | `native.env` | Extra environment for every native runner (toolchain paths such as `JAVA_HOME`, runner hooks such as `ACTIONS_RUNNER_HOOK_JOB_STARTED`). The inherited environment drops `ACTIONS_*`, `GITHUB_*`, `SRG_*` and credential-looking names, so set those here. Never secrets |
 | `native.run_as` | Windows only: run every job as `NT AUTHORITY\NETWORK SERVICE` (or `LOCAL SERVICE`) while the service runs as LocalSystem. `native.root` must be absolute; it is reset to SYSTEM and Administrators only, the jobs dir gets modify for that account, and each directory above it read/list for that directory only. Keep the credential file readable by SYSTEM and Administrators only. Windows PowerShell steps then need `"PSExecutionPolicyPreference": "Bypass"` in `native.env` unless the machine policy allows scripts |
 
+### `gc` (optional): the service cleans up after itself
+
+Each job's container or job directory (with its `_work`) is removed right after the job. What a host still
+collects over time, unused images and build cache, is removed by the service itself when a `gc` block is set,
+on its own timer: no outside schedule.
+
+```json
+"gc": {
+  "interval": "1h",
+  "image_max_age": "168h",
+  "images_max_bytes": "30GB",
+  "keep_images": ["ghcr.io/my-org/ci-base:1"],
+  "build_cache_max_bytes": "10GB",
+  "min_free_disk_percent": 10,
+  "dry_run": true
+}
+```
+
+| Field | Meaning | Default |
+|---|---|---|
+| `interval` | Time between runs (first run 1 minute after start) | `1h` (min `5m`) |
+| `image_max_age` | Unused images tagged on this daemon longer ago than this are removed | off |
+| `image_min_age` | Images tagged more recently than this are never removed (a pull or build in flight) | `6h` |
+| `images_max_bytes` | Then unused images are removed oldest first until all images together are under this | off |
+| `keep_images` | Kept even when unused, on top of every docker scale set's `image` | none |
+| `build_cache_max_bytes` | `docker builder prune` down to this each run (for daemons whose `daemon.json` cannot carry [BuildKit GC](deploy/docker/README.md)) | off |
+| `native_max_job_dir_age` | A native job dir no runner owns, older than this, is removed (the job's own removal failed, e.g. a Windows file lock) | `1h` |
+| `disk_paths` | Paths whose free space is checked each run | `native.root`, and the daemon's data dir when visible |
+| `min_free_disk_percent` | Below this a path is under pressure | `10` |
+| `dry_run` | Plan and report only (`images_planned` in `/status`); remove nothing | `false` |
+
+Sizes are bytes or a string with `B`, `KB`/`MB`/`GB`/`TB` (powers of 1000) or `KiB`/`MiB`/`GiB`/`TiB`.
+
+What is never removed: an image any container (running or stopped) uses, a scale set image or a `keep_images`
+entry (matched by name and by the id the daemon resolves it to), and young images. Removals never use `-f`, so the
+daemon refuses an image a container started using after the listing; that is logged and skipped, not an error. The
+image rules apply to every image on the daemon the service drives: use it on a daemon dedicated to CI, or list what
+else must stay in `keep_images`. Sizes come from `docker image inspect` and overcount layers images share, so the
+cap errs toward removing a little more and `bytes_freed_estimate_total` is an estimate.
+
+**On a daemon shared with production (for example rl9, which also runs a client's production containers):** the
+image rules remove every *unused* image there too, such as a rollback image or the image between `compose down` and
+`compose up` (`image_min_age` does not help: its tag time is old). There, run gc with `dry_run: true` first and list
+every production image in `keep_images` before you turn it off, or set only `build_cache_max_bytes` and the disk
+check (no `image_max_age`, no `images_max_bytes`). Before any docker restart on such a host (the
+[BuildKit GC rollout](deploy/docker/README.md) needs one), check `docker info -f '{{.LiveRestoreEnabled}}'`: when it
+is `false`, the restart stops the production containers too.
+
+Outcome: `/status` has a `gc` object (last run, errors, images left, totals, leftover native dirs, disks) and a
+`degraded` list; `/health` answers `ok`, or `degraded: <reasons>` when the last run failed, the images stay over the
+cap after the run, native dirs could not be removed, a disk is under pressure or the loop stopped running. It stays
+HTTP 200, so a container health check never restarts CI for a full disk. In a container the daemon's data dir is
+not visible: mount it read-only (for example `/var/lib/docker:/host/docker:ro`) and set `disk_paths` to check it.
+
 ## Safety model
 
 - **Fork pull requests and public repos never reach a runner.** Three layers: the org
@@ -382,6 +439,10 @@ removed.
 | `scalerunner_listener_errors_total{scale_set}` | counter | Message session errors |
 | `scalerunner_host_slots_used`, `scalerunner_host_slots_max` | gauge | Host slot pool |
 | `scalerunner_host_paused` | gauge | 1 while the kill switch is on |
+| `scalerunner_gc_runs_total`, `scalerunner_gc_errors_total` | counter | gc runs, and runs that ended with an error |
+| `scalerunner_gc_images_removed_total`, `scalerunner_gc_bytes_freed_estimate_total` | counter | Images the gc removed and their size |
+| `scalerunner_gc_images_bytes` | gauge | Images on the daemon after the last gc run |
+| `scalerunner_disk_pressure` | gauge | 1 while a gc disk path is under `min_free_disk_percent` |
 
 A Prometheus scrape config and a Grafana dashboard are in [`deploy/`](deploy/).
 

@@ -35,6 +35,8 @@ type Native struct {
 
 	mu    sync.Mutex
 	procs map[string]*nativeProc // job dir -> process
+	// claimed job dirs are being started into, stopped or swept by one actor (gc.go claim); guarded by mu.
+	claimed map[string]bool
 }
 
 type nativeProc struct {
@@ -51,7 +53,7 @@ func NewNative(cfg config.NativeBackendConfig, logger *slog.Logger) *Native {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Native{cfg: cfg, logger: logger, procs: map[string]*nativeProc{}}
+	return &Native{cfg: cfg, logger: logger, procs: map[string]*nativeProc{}, claimed: map[string]bool{}}
 }
 
 // Name implements Backend.
@@ -90,6 +92,11 @@ func (n *Native) Start(ctx context.Context, spec RunnerSpec) (Handle, error) {
 		return Handle{}, errors.New("native: empty runner name")
 	}
 	dir := filepath.Join(n.jobsDir(), name)
+	// The gc sweep must never take a dir mid-copy: hold it until procs owns it.
+	if !n.claim(dir) {
+		return Handle{}, fmt.Errorf("native: job dir %s is in use", dir)
+	}
+	defer n.release(dir)
 	if _, err := os.Stat(dir); err == nil {
 		return Handle{}, fmt.Errorf("native: job dir %s already exists", dir)
 	}
@@ -161,7 +168,14 @@ func (n *Native) Stop(ctx context.Context, h Handle) error {
 	n.mu.Lock()
 	p := n.procs[h.ID]
 	delete(n.procs, h.ID)
+	// Hold the dir while it is torn down, so the gc sweep does not race the removal. When the sweep holds it
+	// already, it is removing it anyway.
+	owned := !n.claimed[h.ID]
+	n.claimed[h.ID] = true
 	n.mu.Unlock()
+	if owned {
+		defer n.release(h.ID)
+	}
 	if p != nil {
 		select {
 		case <-p.done:
