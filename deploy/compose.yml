@@ -17,6 +17,8 @@ services:
       - ./config.json:/etc/scalerunnergh/config.json:ro
       # `touch ./control/STOP` is the kill switch (host.kill_switch_file: /control/STOP).
       - ./control:/control:ro
+      # With a gc block: lets gc.disk_paths ["/host/docker"] check the daemon's disk (read-only).
+      # - /var/lib/docker:/host/docker:ro
     secrets:
       - github_pat
     ports:

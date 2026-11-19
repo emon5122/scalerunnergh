@@ -35,7 +35,9 @@ type Config struct {
 	Native    NativeBackendConfig `json:"native"`
 	ScaleSets []ScaleSetConfig    `json:"scale_sets"`
 	Metrics   MetricsConfig       `json:"metrics"`
-	LogLevel  string              `json:"log_level"`
+	// GC is the optional self-cleanup block (unused images, build cache, native job dirs, disk pressure).
+	GC       *GCConfig `json:"gc,omitempty"`
+	LogLevel string    `json:"log_level"`
 	// LogFile appends logs to this file instead of stdout. Needed for the
 	// Windows service, which has no stdout.
 	LogFile string `json:"log_file,omitempty"`
@@ -470,6 +472,9 @@ func (c *Config) Validate() error {
 				return err
 			}
 		}
+	}
+	if c.GC != nil {
+		return c.GC.validate(c)
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 	"github.com/emon5122/scalerunnergh/internal/backend"
 	"github.com/emon5122/scalerunnergh/internal/config"
+	"github.com/emon5122/scalerunnergh/internal/gc"
 	"github.com/emon5122/scalerunnergh/internal/ghapi"
 	"github.com/emon5122/scalerunnergh/internal/guard"
 	"github.com/emon5122/scalerunnergh/internal/hostgate"
@@ -35,6 +37,7 @@ type App struct {
 
 	mu      sync.Mutex
 	scalers []*scaler.Scaler
+	gc      *gc.Runner // nil without a gc block
 }
 
 func (a *App) scalerList() []*scaler.Scaler {
@@ -60,18 +63,19 @@ func (a *App) Run(ctx context.Context) error {
 	cfg := a.Config
 	backends := map[string]backend.Backend{}
 	var docker *backend.Docker
+	var native *backend.Native
 	if cfg.UsesBackend(config.BackendDocker) {
 		docker = backend.NewDocker(cfg.Docker, cfg.Host.Name)
 		docker.Logger = a.Logger
 		backends[config.BackendDocker] = docker
 	}
 	if cfg.UsesBackend(config.BackendNative) {
-		n := backend.NewNative(cfg.Native, a.Logger)
+		native = backend.NewNative(cfg.Native, a.Logger)
 		a.Logger.Info("preparing pinned runner release", "version", cfg.Native.RunnerVersion)
-		if err := n.Prepare(ctx); err != nil {
+		if err := native.Prepare(ctx); err != nil {
 			return err
 		}
-		backends[config.BackendNative] = n
+		backends[config.BackendNative] = native
 	}
 	// Crash safety: nothing of an earlier process survives.
 	for name, b := range backends {
@@ -114,6 +118,28 @@ func (a *App) Run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			docker.PullLoop(ctx, image, every)
+		}()
+	}
+
+	// The service's own cleanup, on its own timer; it stops with ctx.
+	if cfg.GC != nil {
+		var images gc.Images
+		var dirs gc.JobDirs
+		if docker != nil {
+			images = docker
+		}
+		if native != nil {
+			dirs = native
+		}
+		runner := gc.New(cfg, images, dirs, a.Logger, a.Metrics)
+		a.mu.Lock()
+		a.gc = runner
+		a.mu.Unlock()
+		a.Logger.Info("gc enabled", "interval", cfg.GC.Interval.Duration, "dry_run", cfg.GC.DryRun)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runner.Loop(ctx)
 		}()
 	}
 
@@ -210,6 +236,10 @@ type Status struct {
 	SlotsMax  int              `json:"slots_max"`
 	HeavyUsed int              `json:"heavy_used"`
 	ScaleSets []ScaleSetStatus `json:"scale_sets"`
+	// GC is the last self-cleanup run and the disk check (absent without a gc block).
+	GC *gc.Status `json:"gc,omitempty"`
+	// Degraded lists what needs a look (gc failures, images over the cap, disk pressure); empty when fine.
+	Degraded []string `json:"degraded,omitempty"`
 }
 
 // ScaleSetStatus is one scale set in Status.
@@ -227,7 +257,23 @@ func (a *App) Status() Status {
 		alive, busy := s.Count()
 		st.ScaleSets = append(st.ScaleSets, ScaleSetStatus{Name: a.Config.ScaleSets[i].Name, Runners: alive, Busy: busy})
 	}
+	a.mu.Lock()
+	runner := a.gc
+	a.mu.Unlock()
+	if runner != nil {
+		g := runner.Status()
+		st.GC, st.Degraded = &g, g.Degraded()
+	}
 	return st
+}
+
+// Health is the /health body: "ok", or "degraded: <reasons>". It is never an HTTP error: a full disk or a failed
+// cleanup must not make a container health check restart the CI service.
+func (a *App) Health() string {
+	if d := a.Status().Degraded; len(d) > 0 {
+		return "degraded: " + strings.Join(d, "; ")
+	}
+	return "ok"
 }
 
 // guardHTTP has a short timeout: guard checks (and App token refreshes for
