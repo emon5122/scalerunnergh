@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -43,8 +44,15 @@ type fakeDirs struct{ res backend.SweepResult }
 func (f *fakeDirs) SweepJobDirs(time.Duration, bool) (backend.SweepResult, error) { return f.res, nil }
 func (f *fakeDirs) Root() string                                                  { return "/srv/srg" }
 
+// testConfig builds a config with a docker scale set, because the image and
+// build-cache settings need one. config.Validate refuses the docker backend on
+// Windows, so these tests skip there; TestDiskUsageReal still covers the
+// Windows disk path (disk_windows.go).
 func testConfig(t *testing.T, gc string) *config.Config {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the docker backend is Linux only; config.Validate refuses it on Windows")
+	}
 	cfg, err := config.Parse([]byte(`{
   "host": {"name": "h", "max_runners": 2},
   "auth": {"pat_file": "/run/secrets/pat"},

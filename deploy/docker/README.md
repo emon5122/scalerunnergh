@@ -17,6 +17,7 @@ The daemon restart stops every container on that daemon unless `live-restore` is
 ```sh
 # 0. Look first: what is there, and what the daemon config is today.
 docker system df
+docker info -f '{{.LiveRestoreEnabled}}'   # false: the restart in step 4 stops every container (stop on a shared prod daemon, e.g. rl9, and ask its owner)
 sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'
 
 # 1. Merge (never overwrite: the file may hold other settings such as a data-root or log options).

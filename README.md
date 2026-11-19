@@ -300,6 +300,14 @@ image rules apply to every image on the daemon the service drives: use it on a d
 else must stay in `keep_images`. Sizes come from `docker image inspect` and overcount layers images share, so the
 cap errs toward removing a little more and `bytes_freed_estimate_total` is an estimate.
 
+**On a daemon shared with production (for example rl9, which also runs a client's production containers):** the
+image rules remove every *unused* image there too, such as a rollback image or the image between `compose down` and
+`compose up` (`image_min_age` does not help: its tag time is old). There, run gc with `dry_run: true` first and list
+every production image in `keep_images` before you turn it off, or set only `build_cache_max_bytes` and the disk
+check (no `image_max_age`, no `images_max_bytes`). Before any docker restart on such a host (the
+[BuildKit GC rollout](deploy/docker/README.md) needs one), check `docker info -f '{{.LiveRestoreEnabled}}'`: when it
+is `false`, the restart stops the production containers too.
+
 Outcome: `/status` has a `gc` object (last run, errors, images left, totals, leftover native dirs, disks) and a
 `degraded` list; `/health` answers `ok`, or `degraded: <reasons>` when the last run failed, the images stay over the
 cap after the run, native dirs could not be removed, a disk is under pressure or the loop stopped running. It stays
