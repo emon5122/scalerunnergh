@@ -19,7 +19,11 @@ import (
 )
 
 // keepLogs is how many per-runner log files the native backend keeps.
-const keepLogs = 50
+const (
+	keepLogs         = 50
+	quarantinePrefix = "quarantine-"
+	quarantineMaxAge = 7 * 24 * time.Hour
+)
 
 // Native runs each runner as a host process in its own fresh directory
 // (<root>/jobs/<runner>), a copy of the pinned actions/runner release. The
@@ -223,6 +227,16 @@ func (n *Native) Cleanup(ctx context.Context) error {
 	}
 	for _, e := range entries {
 		dir := filepath.Join(n.jobsDir(), e.Name())
+		if isQuarantineDir(dir) {
+			info, err := e.Info()
+			if err != nil || time.Since(info.ModTime()) <= quarantineMaxAge {
+				continue // young quarantine dirs are left alone so startup stays fast
+			}
+			if err := n.removeJobDir(dir); err != nil {
+				n.logger.Warn("native: old quarantine dir could not be removed", "dir", dir, "error", err)
+			}
+			continue
+		}
 		n.mu.Lock()
 		_, live := n.procs[dir]
 		n.mu.Unlock()
@@ -327,11 +341,15 @@ func (n *Native) removeJobDir(dir string) error {
 // and a later cleanup or GC sweep can retry them.
 func quarantineJobDir(dir string) (string, error) {
 	name := filepath.Base(dir)
-	quarantine := filepath.Join(filepath.Dir(dir), "quarantine-"+name+"-"+strconv.FormatInt(time.Now().UnixNano(), 10))
+	quarantine := filepath.Join(filepath.Dir(dir), quarantinePrefix+name+"-"+strconv.FormatInt(time.Now().UnixNano(), 10))
 	if err := os.Rename(dir, quarantine); err != nil {
 		return "", err
 	}
 	return quarantine, nil
+}
+
+func isQuarantineDir(dir string) bool {
+	return strings.HasPrefix(filepath.Base(dir), quarantinePrefix)
 }
 
 // jobEnv is native.env on top of the run_as account's profile variables.

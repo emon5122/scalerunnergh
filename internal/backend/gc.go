@@ -318,8 +318,32 @@ func (n *Native) SweepJobDirs(maxAge time.Duration, dryRun bool) (SweepResult, e
 	for _, e := range entries {
 		dir := filepath.Join(n.jobsDir(), e.Name())
 		fi, err := os.Lstat(dir)
-		if err != nil || !fi.IsDir() || time.Since(fi.ModTime()) < maxAge {
+		if err != nil || !fi.IsDir() {
 			continue // gone, a symlink or a file (never followed), or young
+		}
+		if isQuarantineDir(dir) {
+			if time.Since(fi.ModTime()) <= quarantineMaxAge {
+				continue // young quarantine dirs are left alone without a retry
+			}
+			if dryRun {
+				res.Removed = append(res.Removed, dir)
+				continue
+			}
+			if !n.claim(dir) {
+				continue
+			}
+			if err := n.removeJobDir(dir); err != nil {
+				n.release(dir)
+				res.Leftovers = append(res.Leftovers, dir)
+				n.logger.Warn("gc: old quarantine dir could not be removed", "dir", dir, "error", err)
+				continue
+			}
+			n.release(dir)
+			res.Removed = append(res.Removed, dir)
+			continue
+		}
+		if time.Since(fi.ModTime()) < maxAge {
+			continue // young job dir
 		}
 		if !n.claim(dir) {
 			continue // a live runner's dir, or one being started or stopped
@@ -337,6 +361,11 @@ func (n *Native) SweepJobDirs(maxAge time.Duration, dryRun bool) (SweepResult, e
 		err = n.removeJobDir(dir)
 		n.release(dir)
 		if err != nil {
+			if isQuarantineDir(dir) {
+				res.Leftovers = append(res.Leftovers, dir)
+				n.logger.Warn("gc: quarantine dir could not be removed", "dir", dir, "error", err)
+				continue
+			}
 			quarantined, renameErr := quarantineJobDir(dir)
 			if renameErr != nil {
 				res.Leftovers = append(res.Leftovers, dir)

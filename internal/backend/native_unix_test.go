@@ -205,6 +205,50 @@ func TestNativeCleanupFailureDoesNotStopStartup(t *testing.T) {
 	}
 }
 
+func TestNativeCleanupDoesNotRequarantineAndPrunesOldQuarantine(t *testing.T) {
+	cfg := fakeRunner(t, "exit 0\n")
+	jobs := filepath.Join(cfg.Root, "jobs")
+	stuck := filepath.Join(jobs, "quarantine-srg-stuck-1")
+	old := filepath.Join(jobs, "quarantine-srg-old-2")
+	young := filepath.Join(jobs, "quarantine-srg-young-3")
+	for _, dir := range []string{stuck, old, young} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(stuck, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	var attempts []string
+	n := NewNative(cfg, nil)
+	n.removeDir = func(dir string) error {
+		attempts = append(attempts, dir)
+		if dir == stuck {
+			return errors.New("simulated removal failure")
+		}
+		return os.RemoveAll(dir)
+	}
+	if err := n.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stuck); err != nil {
+		t.Fatalf("stuck quarantine dir should keep its name: %v", err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("old removable quarantine dir should be pruned, stat error: %v", err)
+	}
+	if _, err := os.Stat(young); err != nil {
+		t.Fatalf("young quarantine dir should be left alone: %v", err)
+	}
+	if len(attempts) != 2 || attempts[0] != old || attempts[1] != stuck {
+		t.Fatalf("unexpected removal attempts: %v", attempts)
+	}
+}
+
 func TestNativeEnvFromConfig(t *testing.T) {
 	t.Setenv("ACTIONS_RUNNER_HOOK_JOB_STARTED", "/from/orchestrator/env")
 	out := filepath.Join(t.TempDir(), "seen")
