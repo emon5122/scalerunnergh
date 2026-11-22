@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,6 +150,58 @@ func TestNativeCleanupRemovesLeftovers(t *testing.T) {
 	}
 	if err := n.Stop(context.Background(), Handle{ID: "/etc"}); err == nil {
 		t.Fatal("Stop must refuse a dir outside jobs/")
+	}
+}
+
+func TestNativeCleanupRemovesReadOnlySubtree(t *testing.T) {
+	cfg := fakeRunner(t, "exit 0\n")
+	stale := filepath.Join(cfg.Root, "jobs", "srg-readonly")
+	readonly := filepath.Join(stale, "go", "pkg", "mod")
+	if err := os.MkdirAll(readonly, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(readonly, "cache.zip"), []byte("cache"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(readonly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	n := NewNative(cfg, nil)
+	if err := n.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatalf("read-only job tree should be removed, stat error: %v", err)
+	}
+}
+
+func TestNativeCleanupFailureDoesNotStopStartup(t *testing.T) {
+	cfg := fakeRunner(t, "exit 0\n")
+	stale := filepath.Join(cfg.Root, "jobs", "srg-stuck")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	n := NewNative(cfg, nil)
+	n.removeDir = func(string) error { return errors.New("simulated removal failure") }
+	if err := n.Cleanup(context.Background()); err != nil {
+		t.Fatalf("cleanup failure must be non-fatal: %v", err)
+	}
+	entries, err := os.ReadDir(n.jobsDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "quarantine-srg-stuck-") {
+		t.Fatalf("stuck dir should be quarantined, entries: %v", entries)
+	}
+	h, err := n.Start(context.Background(), RunnerSpec{Name: "srg-starts", JITConfig: "J"})
+	if err != nil {
+		t.Fatalf("startup after cleanup failure: %v", err)
+	}
+	if _, err := n.Wait(context.Background(), h); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.Stop(context.Background(), h); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -334,11 +334,17 @@ func (n *Native) SweepJobDirs(maxAge time.Duration, dryRun bool) (SweepResult, e
 				n.logger.Warn("gc: killed leftover runner process", "pid", pid, "dir", dir)
 			}
 		}
-		err = removeAll(dir)
+		err = n.removeJobDir(dir)
 		n.release(dir)
 		if err != nil {
-			res.Leftovers = append(res.Leftovers, dir)
-			n.logger.Warn("gc: leftover job dir not removed", "dir", dir, "error", err)
+			quarantined, renameErr := quarantineJobDir(dir)
+			if renameErr != nil {
+				res.Leftovers = append(res.Leftovers, dir)
+				n.logger.Warn("gc: leftover job dir not removed or quarantined", "dir", dir, "error", err, "quarantine_error", renameErr)
+			} else {
+				res.Leftovers = append(res.Leftovers, quarantined)
+				n.logger.Warn("gc: leftover job dir quarantined", "dir", dir, "quarantine", quarantined, "error", err)
+			}
 			continue
 		}
 		res.Removed = append(res.Removed, dir)
