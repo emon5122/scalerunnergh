@@ -19,7 +19,11 @@ import (
 )
 
 // keepLogs is how many per-runner log files the native backend keeps.
-const keepLogs = 50
+const (
+	keepLogs         = 50
+	quarantinePrefix = "quarantine-"
+	quarantineMaxAge = 7 * 24 * time.Hour
+)
 
 // Native runs each runner as a host process in its own fresh directory
 // (<root>/jobs/<runner>), a copy of the pinned actions/runner release. The
@@ -37,6 +41,9 @@ type Native struct {
 	procs map[string]*nativeProc // job dir -> process
 	// claimed job dirs are being started into, stopped or swept by one actor (gc.go claim); guarded by mu.
 	claimed map[string]bool
+	// removeDir is the filesystem remover used by cleanup and GC. Kept on the
+	// backend so removal failures can be handled without making startup fatal.
+	removeDir func(string) error
 }
 
 type nativeProc struct {
@@ -215,11 +222,21 @@ func (n *Native) Cleanup(ctx context.Context) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		n.logger.Warn("native: could not read jobs dir during startup cleanup", "dir", n.jobsDir(), "error", err)
+		return nil
 	}
-	var firstErr error
 	for _, e := range entries {
 		dir := filepath.Join(n.jobsDir(), e.Name())
+		if isQuarantineDir(dir) {
+			info, err := e.Info()
+			if err != nil || time.Since(info.ModTime()) <= quarantineMaxAge {
+				continue // young quarantine dirs are left alone so startup stays fast
+			}
+			if err := n.removeJobDir(dir); err != nil {
+				n.logger.Warn("native: old quarantine dir could not be removed", "dir", dir, "error", err)
+			}
+			continue
+		}
 		n.mu.Lock()
 		_, live := n.procs[dir]
 		n.mu.Unlock()
@@ -231,11 +248,16 @@ func (n *Native) Cleanup(ctx context.Context) error {
 				n.logger.Warn("killed leftover runner process", "pid", pid, "dir", dir)
 			}
 		}
-		if err := removeAll(dir); err != nil && firstErr == nil {
-			firstErr = err
+		if err := n.removeJobDir(dir); err != nil {
+			quarantined, renameErr := quarantineJobDir(dir)
+			if renameErr != nil {
+				n.logger.Warn("native: leftover job dir could not be removed or quarantined", "dir", dir, "error", err, "quarantine_error", renameErr)
+			} else {
+				n.logger.Warn("native: leftover job dir quarantined", "dir", dir, "quarantine", quarantined, "error", err)
+			}
 		}
 	}
-	return firstErr
+	return nil
 }
 
 func (n *Native) pruneLogs() {
@@ -259,16 +281,75 @@ func (n *Native) pruneLogs() {
 	}
 }
 
-// removeAll retries, because Windows keeps files locked briefly after a kill.
+// removeAll first makes directories owner-writable. Go's RemoveAll cannot
+// remove entries from a read-only directory, as can happen in a Go module cache.
+// It retries because Windows keeps files locked briefly after a kill.
 func removeAll(dir string) error {
 	var err error
 	for i := 0; i < 10; i++ {
-		if err = os.RemoveAll(dir); err == nil {
-			return nil
+		if err = makeTreeWritable(dir); err != nil {
+			// Still try RemoveAll: some entries may have changed since the walk.
+			if removeErr := os.RemoveAll(dir); removeErr == nil {
+				return nil
+			} else {
+				err = errors.Join(err, removeErr)
+			}
+		} else {
+			err = os.RemoveAll(dir)
+			if err == nil {
+				return nil
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	return err
+}
+
+// makeTreeWritable adds owner read/write/execute to directories before walking
+// them, so even mode-000 or read-only descendants can be traversed and cleared.
+func makeTreeWritable(root string) error {
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() {
+		return err
+	}
+	mode := info.Mode().Perm() | 0o700
+	if err := os.Chmod(root, mode); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	var walkErr error
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		if entry.IsDir() {
+			walkErr = errors.Join(walkErr, makeTreeWritable(path))
+		}
+	}
+	return walkErr
+}
+
+func (n *Native) removeJobDir(dir string) error {
+	if n.removeDir != nil {
+		return n.removeDir(dir)
+	}
+	return removeAll(dir)
+}
+
+// quarantineJobDir keeps failed removals under jobs/ so startup can continue
+// and a later cleanup or GC sweep can retry them.
+func quarantineJobDir(dir string) (string, error) {
+	name := filepath.Base(dir)
+	quarantine := filepath.Join(filepath.Dir(dir), quarantinePrefix+name+"-"+strconv.FormatInt(time.Now().UnixNano(), 10))
+	if err := os.Rename(dir, quarantine); err != nil {
+		return "", err
+	}
+	return quarantine, nil
+}
+
+func isQuarantineDir(dir string) bool {
+	return strings.HasPrefix(filepath.Base(dir), quarantinePrefix)
 }
 
 // jobEnv is native.env on top of the run_as account's profile variables.
