@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/emon5122/scalerunnergh/compare/v1.5.0...v1.5.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* restart-spike alert, quarantine follow-ups, runner image CVEs (cards [#1250](https://github.com/emon5122/scalerunnergh/issues/1250) [#1264](https://github.com/emon5122/scalerunnergh/issues/1264) [#1146](https://github.com/emon5122/scalerunnergh/issues/1146)) ([#13](https://github.com/emon5122/scalerunnergh/issues/13)) ([8427e75](https://github.com/emon5122/scalerunnergh/commit/8427e759ae37a4ff8beaa0392d64fdcfb7491305))
+
 ## [1.5.0](https://github.com/emon5122/scalerunnergh/compare/v1.4.0...v1.5.0) (2026-11-22)
 
 
