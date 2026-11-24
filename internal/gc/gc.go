@@ -59,6 +59,8 @@ type Status struct {
 
 	NativeDirsRemovedTotal int      `json:"native_dirs_removed_total"`
 	NativeLeftoverDirs     []string `json:"native_leftover_dirs,omitempty"`
+	// NativeQuarantinedDirs failed removal earlier and wait for their retry (they still use disk).
+	NativeQuarantinedDirs []string `json:"native_quarantined_dirs,omitempty"`
 
 	Disks        []Disk `json:"disks,omitempty"`
 	DiskPressure bool   `json:"disk_pressure"`
@@ -145,7 +147,7 @@ func (r *Runner) RunOnce(ctx context.Context) {
 	r.mu.Lock()
 	next := r.st // carries the totals
 	r.mu.Unlock()
-	next.Errors, next.ImagesPlanned, next.NativeLeftoverDirs, next.BuildCachePruned = nil, nil, nil, ""
+	next.Errors, next.ImagesPlanned, next.NativeLeftoverDirs, next.NativeQuarantinedDirs, next.BuildCachePruned = nil, nil, nil, nil, ""
 
 	if r.images != nil && r.imageRules() {
 		res, err := r.images.GCImages(ctx, r.keepRefs, backend.ImagePolicy{
@@ -188,7 +190,10 @@ func (r *Runner) RunOnce(ctx context.Context) {
 		if !r.cfg.DryRun {
 			next.NativeDirsRemovedTotal += len(res.Removed)
 		}
-		next.NativeLeftoverDirs = res.Leftovers
+		next.NativeLeftoverDirs, next.NativeQuarantinedDirs = res.Leftovers, res.Quarantined
+		if len(res.Quarantined) > 0 {
+			r.logger.Info("gc: quarantined native job dirs wait for their retry", "count", len(res.Quarantined))
+		}
 		if len(res.Removed) > 0 {
 			r.logger.Info("gc: leftover native job dirs", "removed", len(res.Removed), "dry_run", r.cfg.DryRun)
 		}
@@ -269,6 +274,7 @@ func (r *Runner) Status() Status {
 	st.Errors = append([]string(nil), st.Errors...)
 	st.ImagesPlanned = append([]string(nil), st.ImagesPlanned...)
 	st.NativeLeftoverDirs = append([]string(nil), st.NativeLeftoverDirs...)
+	st.NativeQuarantinedDirs = append([]string(nil), st.NativeQuarantinedDirs...)
 	st.Disks = append([]Disk(nil), st.Disks...)
 	if st.LastRun != nil {
 		t := *st.LastRun

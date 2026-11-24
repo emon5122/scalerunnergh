@@ -290,3 +290,39 @@ func TestDockerRegistryAuth(t *testing.T) {
 		}
 	}
 }
+
+func TestRestartAlertDefaults(t *testing.T) {
+	cfg, err := Parse([]byte(validDocker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ra := cfg.Host.RestartAlert
+	if ra == nil || ra.MaxStarts != 5 || ra.Window.Duration != time.Hour || cfg.Host.StateDir != "" {
+		t.Fatalf("docker host defaults: %+v %q", ra, cfg.Host.StateDir)
+	}
+	sha := strings.Repeat("ab", 32)
+	native := `{"host": {"name": "h", "max_runners": 1HOST},
+	  "auth": {"pat_file": "/p"},
+	  "native": {"root": "/opt/srg", "runner_version": "2.338.2", "runner_sha256": "` + sha + `"},
+	  "scale_sets": [{"name": "w", "url": "https://github.com/o/r", "runner_group": "g", "backend": "native"}]}`
+	cfg, err = Parse([]byte(strings.Replace(native, "HOST", "", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Host.StateDir != filepath.Join("/opt/srg", "state") {
+		t.Fatalf("native state_dir default: %q", cfg.Host.StateDir)
+	}
+	cfg, err = Parse([]byte(strings.Replace(native, "HOST",
+		`, "state_dir": "/var/lib/srg", "restart_alert": {"max_starts": 3, "window": "30m", "command": ["/bin/alert", "x"]}`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ra := cfg.Host.RestartAlert; cfg.Host.StateDir != "/var/lib/srg" || ra.MaxStarts != 3 || ra.Window.Duration != 30*time.Minute || len(ra.Command) != 2 {
+		t.Fatalf("explicit: %q %+v", cfg.Host.StateDir, ra)
+	}
+	for _, bad := range []string{`, "restart_alert": {"window": "10s"}`, `, "restart_alert": {"max_starts": -1}`, `, "restart_alert": {"command": [""]}`} {
+		if _, err := Parse([]byte(strings.Replace(native, "HOST", bad, 1))); err == nil || !strings.Contains(err.Error(), "restart_alert") {
+			t.Errorf("%s: want a restart_alert error, got %v", bad, err)
+		}
+	}
+}
