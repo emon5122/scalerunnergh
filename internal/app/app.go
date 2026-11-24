@@ -38,6 +38,16 @@ type App struct {
 	mu      sync.Mutex
 	scalers []*scaler.Scaler
 	gc      *gc.Runner // nil without a gc block
+
+	restartSpike      string    // set at startup after a crash loop
+	restartSpikeUntil time.Time // it shows in /health until then
+}
+
+// SetRestartSpike makes /health and /status report a restart spike for d.
+func (a *App) SetRestartSpike(msg string, d time.Duration) {
+	a.mu.Lock()
+	a.restartSpike, a.restartSpikeUntil = msg, time.Now().Add(d)
+	a.mu.Unlock()
 }
 
 func (a *App) scalerList() []*scaler.Scaler {
@@ -259,10 +269,15 @@ func (a *App) Status() Status {
 	}
 	a.mu.Lock()
 	runner := a.gc
+	spike, spikeUntil := a.restartSpike, a.restartSpikeUntil
 	a.mu.Unlock()
+	if spike != "" && time.Now().Before(spikeUntil) {
+		st.Degraded = append(st.Degraded, spike)
+	}
 	if runner != nil {
 		g := runner.Status()
-		st.GC, st.Degraded = &g, g.Degraded()
+		st.GC = &g
+		st.Degraded = append(st.Degraded, g.Degraded()...)
 	}
 	return st
 }

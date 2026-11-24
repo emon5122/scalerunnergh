@@ -211,6 +211,25 @@ One JSON file per host. Unknown fields are errors. Validate with
 | `idle_timeout` | Surplus idle runners are removed after this long | `3m` |
 | `max_job_duration` | A runner is force-stopped after this long | `6h30m` |
 | `drain_timeout` | On shutdown, let running jobs finish for up to this long | `0` |
+| `state_dir` | The service's own state (the start record of the restart alert) | `<native.root>/state` with the native backend, else none |
+| `restart_alert` | `max_starts`, `window`, `command`: see [Restart-spike alert](#restart-spike-alert) | `5`, `1h`, none |
+
+#### Restart-spike alert
+
+A service manager restarts a failing service forever (systemd `Restart=always`), and a process that dies seconds
+after every start never shows up on a scraper of its own metrics. So every start is recorded in
+`<state_dir>/starts.json`, and a clean exit clears the record (deploys and planned restarts never count). A start
+that finds more than `max_starts` unclean starts within `window` is a restart spike:
+
+- an `error` log line `restart spike` with the count and the last exit error;
+- `scalerunner_restart_spike 1`, and `/health` reports `degraded: restart spike ...` for one window;
+- `command` (argv, no shell) runs at most once per window, with `SRG_ALERT=restart_spike`, `SRG_HOST`,
+  `SRG_STARTS`, `SRG_WINDOW` and `SRG_LAST_ERROR` in its environment (10 s timeout). Without `command`, the program
+  named by `SCALERUNNERGH_ALERT_COMMAND` runs instead.
+
+`state_dir` comes from the config, so a config that cannot be loaded is not counted. To count those too, give the
+state dir outside the config: `--state-dir` or `SCALERUNNERGH_STATE_DIR` (the systemd unit in
+[`deploy/systemd`](deploy/systemd/scalerunnergh.service) does), and `SCALERUNNERGH_ALERT_COMMAND` for the alert.
 
 ### `auth` (host default, or per scale set)
 
@@ -443,8 +462,12 @@ removed.
 | `scalerunner_gc_images_removed_total`, `scalerunner_gc_bytes_freed_estimate_total` | counter | Images the gc removed and their size |
 | `scalerunner_gc_images_bytes` | gauge | Images on the daemon after the last gc run |
 | `scalerunner_disk_pressure` | gauge | 1 while a gc disk path is under `min_free_disk_percent` |
+| `scalerunner_start_time_seconds` | gauge | Unix time this process started |
+| `scalerunner_recent_unclean_starts` | gauge | Starts not ended by a clean exit within `restart_alert.window`, this one included |
+| `scalerunner_restart_spike` | gauge | 1 when this process started during a restart spike |
 
-A Prometheus scrape config and a Grafana dashboard are in [`deploy/`](deploy/).
+A Prometheus scrape config with alert rules (restart spike, target down) and a Grafana dashboard are in
+[`deploy/`](deploy/).
 
 ## Development
 

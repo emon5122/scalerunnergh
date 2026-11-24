@@ -1,0 +1,26 @@
+groups:
+  - name: scalerunnergh
+    rules:
+      # The service started during a crash loop (more than restart_alert.max_starts unclean starts in the window).
+      - alert: ScaleRunnerRestartSpike
+        expr: max_over_time(scalerunner_restart_spike[1h]) == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "scalerunnergh on {{ $labels.instance }} is crash-looping"
+          description: "{{ $value }}: see the 'restart spike' log line for the last exit error."
+      # Restarts the record does not see (no state dir): the start time keeps changing.
+      - alert: ScaleRunnerFrequentRestarts
+        expr: changes(scalerunner_start_time_seconds[1h]) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "scalerunnergh on {{ $labels.instance }} restarted {{ $value }} times in 1h"
+      # A process that dies at startup is never scraped: only the target being down shows it.
+      - alert: ScaleRunnerDown
+        expr: up{job="scalerunnergh"} == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "scalerunnergh on {{ $labels.instance }} has not been scrapeable for 10m"

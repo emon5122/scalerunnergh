@@ -68,6 +68,36 @@ type HostConfig struct {
 	// stopping them (default 0 = stop at once). Give the service manager at
 	// least this much stop time.
 	DrainTimeout Duration `json:"drain_timeout"`
+	// StateDir holds the service's own small state (the start record of the restart-spike alert). Default:
+	// <native.root>/state with the native backend, else unset (no restart record unless --state-dir or
+	// SCALERUNNERGH_STATE_DIR names one).
+	StateDir string `json:"state_dir,omitempty"`
+	// RestartAlert tunes the restart-spike alert (defaults apply when absent).
+	RestartAlert *RestartAlertConfig `json:"restart_alert,omitempty"`
+}
+
+// RestartAlertConfig: a start that finds more than MaxStarts unclean starts (starts not ended by a clean exit)
+// within Window is a restart spike: an error in the log, scalerunner_restart_spike 1, /health degraded and, when
+// set, Command is run once per window.
+type RestartAlertConfig struct {
+	// MaxStarts unclean starts within Window are still fine (default 5).
+	MaxStarts int `json:"max_starts"`
+	// Window to count starts in (default 1h, minimum 1m).
+	Window Duration `json:"window"`
+	// Command (argv, no shell) is run on a spike, at most once per window, with SRG_ALERT, SRG_HOST, SRG_STARTS,
+	// SRG_WINDOW and SRG_LAST_ERROR in its environment. Optional.
+	Command []string `json:"command,omitempty"`
+}
+
+// Restart alert defaults; DefaultRestartAlert also applies when the config itself cannot be loaded.
+const (
+	DefaultRestartMaxStarts = 5
+	DefaultRestartWindow    = time.Hour
+)
+
+// DefaultRestartAlert is the restart alert without a config block.
+func DefaultRestartAlert() RestartAlertConfig {
+	return RestartAlertConfig{MaxStarts: DefaultRestartMaxStarts, Window: Duration{DefaultRestartWindow}}
 }
 
 // AuthConfig names the credential files for one GitHub org or repo.
@@ -347,6 +377,23 @@ func (c *Config) Validate() error {
 	if c.Host.DrainTimeout.Duration < 0 {
 		return errors.New("config: host.drain_timeout must be >= 0")
 	}
+	if c.Host.RestartAlert == nil {
+		ra := DefaultRestartAlert()
+		c.Host.RestartAlert = &ra
+	}
+	ra := c.Host.RestartAlert
+	if ra.MaxStarts == 0 {
+		ra.MaxStarts = DefaultRestartMaxStarts
+	}
+	if ra.Window.Duration == 0 {
+		ra.Window.Duration = DefaultRestartWindow
+	}
+	if ra.MaxStarts < 0 || ra.Window.Duration < time.Minute {
+		return errors.New("config: host.restart_alert needs max_starts >= 0 and a window of at least 1m")
+	}
+	if len(ra.Command) > 0 && ra.Command[0] == "" {
+		return errors.New("config: host.restart_alert.command must start with the program to run")
+	}
 	if c.Docker.Binary == "" {
 		c.Docker.Binary = "docker"
 	}
@@ -472,6 +519,9 @@ func (c *Config) Validate() error {
 				return err
 			}
 		}
+	}
+	if c.Host.StateDir == "" && usesNative {
+		c.Host.StateDir = filepath.Join(c.Native.Root, "state")
 	}
 	if c.GC != nil {
 		return c.GC.validate(c)

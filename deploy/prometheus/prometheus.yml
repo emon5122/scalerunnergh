@@ -2,6 +2,9 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+rule_files:
+  - alerts.yml # next to this file
+
 scrape_configs:
   - job_name: "scalerunnergh"
     static_configs:

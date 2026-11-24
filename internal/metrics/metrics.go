@@ -32,6 +32,10 @@ const (
 	GCBytesFreed    = "scalerunner_gc_bytes_freed_estimate_total"
 	GCImagesBytes   = "scalerunner_gc_images_bytes"
 	DiskPressure    = "scalerunner_disk_pressure"
+
+	StartTime    = "scalerunner_start_time_seconds"
+	RecentStarts = "scalerunner_recent_unclean_starts"
+	RestartSpike = "scalerunner_restart_spike"
 )
 
 var help = map[string]string{
@@ -54,6 +58,9 @@ var help = map[string]string{
 	GCBytesFreed:     "Bytes the gc freed (estimate: image sizes overcount shared layers)",
 	GCImagesBytes:    "Total size of the images on the docker daemon at the last gc run",
 	DiskPressure:     "1 while a gc disk path has less free space than gc.min_free_disk_percent",
+	StartTime:        "Unix time this process started",
+	RecentStarts:     "Starts not ended by a clean exit within host.restart_alert.window, this one included",
+	RestartSpike:     "1 when this process started after more than host.restart_alert.max_starts unclean starts in the window",
 }
 
 // Collector stores metric values.

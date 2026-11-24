@@ -9,6 +9,11 @@ Wants=network-online.target
 User=srg
 Group=srg
 ExecStart=/usr/local/bin/scalerunnergh --config /etc/scalerunnergh/config.json
+# The restart record lives outside the config, so even a config that fails to load counts toward a restart
+# spike. Optionally name an alert program (run with SRG_ALERT, SRG_HOST, SRG_STARTS, SRG_WINDOW, SRG_LAST_ERROR).
+StateDirectory=scalerunnergh
+Environment=SCALERUNNERGH_STATE_DIR=/var/lib/scalerunnergh
+#Environment=SCALERUNNERGH_ALERT_COMMAND=/usr/local/bin/scalerunnergh-alert
 Restart=always
 RestartSec=10
 # Longer than host.drain_timeout, so a restart lets running jobs finish.
