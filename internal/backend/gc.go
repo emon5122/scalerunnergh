@@ -300,7 +300,10 @@ func shortID(id string) string {
 // SweepResult is one native job dir sweep.
 type SweepResult struct {
 	Removed   []string // job dirs removed
-	Leftovers []string // job dirs that could not be removed
+	Leftovers []string // job dirs that could not be removed (now, or a quarantine dir past its age)
+	// Quarantined are young quarantine dirs: removal failed earlier, they wait (still using disk) for their retry
+	// after quarantineMaxAge. Reported, but not a failure.
+	Quarantined []string
 }
 
 // SweepJobDirs removes job dirs no live runner owns and no runner is being started into, last modified longer ago
@@ -322,8 +325,9 @@ func (n *Native) SweepJobDirs(maxAge time.Duration, dryRun bool) (SweepResult, e
 			continue // gone, a symlink or a file (never followed), or young
 		}
 		if isQuarantineDir(dir) {
-			if time.Since(fi.ModTime()) <= quarantineMaxAge {
-				continue // young quarantine dirs are left alone without a retry
+			if quarantineAge(dir, fi.ModTime(), time.Now()) <= quarantineMaxAge {
+				res.Quarantined = append(res.Quarantined, dir) // left alone without a retry
+				continue
 			}
 			if dryRun {
 				res.Removed = append(res.Removed, dir)
@@ -332,13 +336,13 @@ func (n *Native) SweepJobDirs(maxAge time.Duration, dryRun bool) (SweepResult, e
 			if !n.claim(dir) {
 				continue
 			}
-			if err := n.removeJobDir(dir); err != nil {
-				n.release(dir)
+			err := n.removeQuarantineDir(dir)
+			n.release(dir)
+			if err != nil {
 				res.Leftovers = append(res.Leftovers, dir)
 				n.logger.Warn("gc: old quarantine dir could not be removed", "dir", dir, "error", err)
 				continue
 			}
-			n.release(dir)
 			res.Removed = append(res.Removed, dir)
 			continue
 		}
@@ -359,14 +363,10 @@ func (n *Native) SweepJobDirs(maxAge time.Duration, dryRun bool) (SweepResult, e
 			}
 		}
 		err = n.removeJobDir(dir)
-		n.release(dir)
 		if err != nil {
-			if isQuarantineDir(dir) {
-				res.Leftovers = append(res.Leftovers, dir)
-				n.logger.Warn("gc: quarantine dir could not be removed", "dir", dir, "error", err)
-				continue
-			}
+			// Still claimed while it is renamed.
 			quarantined, renameErr := quarantineJobDir(dir)
+			n.release(dir)
 			if renameErr != nil {
 				res.Leftovers = append(res.Leftovers, dir)
 				n.logger.Warn("gc: leftover job dir not removed or quarantined", "dir", dir, "error", err, "quarantine_error", renameErr)
@@ -376,6 +376,7 @@ func (n *Native) SweepJobDirs(maxAge time.Duration, dryRun bool) (SweepResult, e
 			}
 			continue
 		}
+		n.release(dir)
 		res.Removed = append(res.Removed, dir)
 	}
 	return res, nil

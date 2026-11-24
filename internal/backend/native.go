@@ -229,10 +229,10 @@ func (n *Native) Cleanup(ctx context.Context) error {
 		dir := filepath.Join(n.jobsDir(), e.Name())
 		if isQuarantineDir(dir) {
 			info, err := e.Info()
-			if err != nil || time.Since(info.ModTime()) <= quarantineMaxAge {
+			if err != nil || quarantineAge(dir, info.ModTime(), time.Now()) <= quarantineMaxAge {
 				continue // young quarantine dirs are left alone so startup stays fast
 			}
-			if err := n.removeJobDir(dir); err != nil {
+			if err := n.removeQuarantineDir(dir); err != nil {
 				n.logger.Warn("native: old quarantine dir could not be removed", "dir", dir, "error", err)
 			}
 			continue
@@ -281,26 +281,28 @@ func (n *Native) pruneLogs() {
 	}
 }
 
-// removeAll first makes directories owner-writable. Go's RemoveAll cannot
-// remove entries from a read-only directory, as can happen in a Go module cache.
-// It retries because Windows keeps files locked briefly after a kill.
-func removeAll(dir string) error {
+// removeAll removes a job dir, retrying because Windows keeps files locked
+// briefly after a kill.
+func removeAll(dir string) error { return removeAllTries(dir, 10) }
+
+// removeAllTries tries plain os.RemoveAll first (the common case, one walk).
+// Only after a failure does it make directories owner-writable: Go's RemoveAll
+// cannot remove entries from a read-only directory, as in a Go module cache.
+func removeAllTries(dir string, tries int) error {
 	var err error
-	for i := 0; i < 10; i++ {
-		if err = makeTreeWritable(dir); err != nil {
-			// Still try RemoveAll: some entries may have changed since the walk.
-			if removeErr := os.RemoveAll(dir); removeErr == nil {
-				return nil
-			} else {
-				err = errors.Join(err, removeErr)
-			}
-		} else {
-			err = os.RemoveAll(dir)
-			if err == nil {
-				return nil
-			}
+	for i := 0; i < tries; i++ {
+		if i > 0 {
+			time.Sleep(500 * time.Millisecond)
 		}
-		time.Sleep(500 * time.Millisecond)
+		if err = os.RemoveAll(dir); err == nil {
+			return nil
+		}
+		// Still try RemoveAll when the chmod walk fails: some entries may have changed since.
+		chmodErr := makeTreeWritable(dir)
+		if err = os.RemoveAll(dir); err == nil {
+			return nil
+		}
+		err = errors.Join(err, chmodErr)
 	}
 	return err
 }
@@ -337,8 +339,19 @@ func (n *Native) removeJobDir(dir string) error {
 	return removeAll(dir)
 }
 
+// removeQuarantineDir makes one attempt: a quarantine dir already failed the
+// retries, and a permanently stuck one must not cost seconds on every sweep and
+// every startup.
+func (n *Native) removeQuarantineDir(dir string) error {
+	if n.removeDir != nil {
+		return n.removeDir(dir)
+	}
+	return removeAllTries(dir, 1)
+}
+
 // quarantineJobDir keeps failed removals under jobs/ so startup can continue
-// and a later cleanup or GC sweep can retry them.
+// and a later cleanup or GC sweep can retry them. The name carries the
+// quarantine time (rename does not touch the dir's mtime).
 func quarantineJobDir(dir string) (string, error) {
 	name := filepath.Base(dir)
 	quarantine := filepath.Join(filepath.Dir(dir), quarantinePrefix+name+"-"+strconv.FormatInt(time.Now().UnixNano(), 10))
@@ -350,6 +363,22 @@ func quarantineJobDir(dir string) (string, error) {
 
 func isQuarantineDir(dir string) bool {
 	return strings.HasPrefix(filepath.Base(dir), quarantinePrefix)
+}
+
+// minQuarantineStamp: a name suffix below this (2020-01-01 in Unix nanoseconds)
+// is not a quarantine stamp, e.g. a short number in a runner name.
+const minQuarantineStamp = 1577836800 * int64(time.Second)
+
+// quarantineAge is how long ago dir was quarantined: from the nanosecond stamp
+// quarantineJobDir puts in the name, else (no plausible stamp) from mtime.
+func quarantineAge(dir string, mod time.Time, now time.Time) time.Duration {
+	base := filepath.Base(dir)
+	if i := strings.LastIndexByte(base, '-'); i >= 0 {
+		if ns, err := strconv.ParseInt(base[i+1:], 10, 64); err == nil && ns >= minQuarantineStamp && ns <= now.UnixNano() {
+			return now.Sub(time.Unix(0, ns))
+		}
+	}
+	return now.Sub(mod)
 }
 
 // jobEnv is native.env on top of the run_as account's profile variables.

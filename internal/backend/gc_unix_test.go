@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -138,5 +139,57 @@ func TestNativeStartRefusesClaimedDir(t *testing.T) {
 	}
 	if _, err := os.Stat(h.ID); !os.IsNotExist(err) {
 		t.Fatal("job dir (and its _work) must be gone after the job")
+	}
+}
+
+func TestQuarantineAgeFromStamp(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-30 * 24 * time.Hour)
+	stamped := "quarantine-srg-r1-" + strconv.FormatInt(now.Add(-time.Hour).UnixNano(), 10)
+	if got := quarantineAge(stamped, old, now); got < 59*time.Minute || got > 61*time.Minute {
+		t.Fatalf("stamped age = %s, want about 1h (the stamp, not the 30d mtime)", got)
+	}
+	for _, name := range []string{"quarantine-srg-young-3", "quarantine-x", "quarantine-x-" + strconv.FormatInt(now.Add(time.Hour).UnixNano(), 10)} {
+		if got := quarantineAge(name, old, now); got != now.Sub(old) {
+			t.Fatalf("%s: age = %s, want the mtime fallback", name, got)
+		}
+	}
+}
+
+func TestNativeSweepQuarantineUsesStampAndReportsQuarantined(t *testing.T) {
+	n := NewNative(config.NativeBackendConfig{Root: t.TempDir()}, nil)
+	jobs := n.jobsDir()
+	// Quarantined an hour ago, but the dir itself is old (rename keeps the mtime): it must wait.
+	young := filepath.Join(jobs, "quarantine-srg-a-"+strconv.FormatInt(time.Now().Add(-time.Hour).UnixNano(), 10))
+	stuck := filepath.Join(jobs, "srg-b")
+	for _, dir := range []string{young, stuck} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-30 * 24 * time.Hour)
+		if err := os.Chtimes(dir, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n.removeDir = func(dir string) error {
+		if dir == young {
+			t.Fatalf("young quarantine dir %s must not be retried", dir)
+		}
+		return errors.New("simulated removal failure")
+	}
+	res, err := n.SweepJobDirs(time.Hour, false)
+	if err != nil || len(res.Removed) != 0 || len(res.Leftovers) != 1 || !isQuarantineDir(res.Leftovers[0]) {
+		t.Fatalf("sweep: %+v %v", res, err)
+	}
+	if !slices.Equal(res.Quarantined, []string{young}) {
+		t.Fatalf("quarantined = %v, want the young one", res.Quarantined)
+	}
+	if len(n.claimed) != 0 {
+		t.Fatalf("claims left after the sweep: %v", n.claimed)
+	}
+	// The freshly quarantined dir is young by its stamp on the next sweep.
+	res, err = n.SweepJobDirs(time.Hour, false)
+	if err != nil || len(res.Leftovers) != 0 || len(res.Quarantined) != 2 {
+		t.Fatalf("second sweep: %+v %v", res, err)
 	}
 }
