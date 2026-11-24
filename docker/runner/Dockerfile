@@ -39,6 +39,11 @@ RUN set -eux; \
         "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${arch}-${RUNNER_VERSION}.tar.gz"; \
     echo "${sha}  runner.tar.gz" | sha256sum -c -; \
     tar xzf runner.tar.gz; rm runner.tar.gz; \
+    # The runner runs JavaScript actions with its bundled node binary only: nothing uses that node's npm, npx or
+    # corepack, and their bundled packages carry CVEs (tar 6.2.1 in node20's npm 10.8.2). Ship node alone.
+    for d in externals/node*; do \
+        rm -rf "$d/lib/node_modules/npm" "$d/lib/node_modules/corepack" "$d/bin/npm" "$d/bin/npx" "$d/bin/corepack"; \
+    done; \
     ./bin/installdependencies.sh; \
     rm -rf /var/lib/apt/lists/*; \
     chown -R runner:runner /home/runner
@@ -56,11 +61,14 @@ ENTRYPOINT ["/usr/local/bin/srg-entrypoint"]
 # ---- node: Node.js LTS + pnpm ---------------------------------------------
 FROM base AS node
 # renovate: datasource=node-version depName=node
-ARG NODE_VERSION=22.21.1
+ARG NODE_VERSION=22.23.5
 # renovate: datasource=npm depName=pnpm
 ARG PNPM_VERSION=10.20.0
-ARG NODE_SHA256_AMD64=680d3f30b24a7ff24b98db5e96f294c0070f8f9078df658da1bce1b9c9873c88
-ARG NODE_SHA256_ARM64=e660365729b434af422bcd2e8e14228637ecf24a1de2cd7c916ad48f2a0521e1
+# The npm bundled with Node 22 (10.9.x) still ships vulnerable brace-expansion and ip-address; npm 11 does not.
+# renovate: datasource=npm depName=npm
+ARG NPM_VERSION=11.21.3
+ARG NODE_SHA256_AMD64=cdeb8670a0c81f51b4dc4ac61919f9b1ad917b304bf8221eb939570663d240f8
+ARG NODE_SHA256_ARM64=2babb9eb5264860d540849f4b064a6fbdebcdc323657d9d382ce23d313fd5e09
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
         amd64) a=x64; sha="${NODE_SHA256_AMD64}" ;; \
@@ -70,8 +78,10 @@ RUN set -eux; \
     echo "${sha}  /tmp/node.tar.xz" | sha256sum -c -; \
     tar -xJ -f /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner; \
     rm /tmp/node.tar.xz; \
+    npm install -g "npm@${NPM_VERSION}"; \
     npm install -g "pnpm@${PNPM_VERSION}"; \
-    node --version; pnpm --version
+    npm cache clean --force; \
+    node --version; npm --version; pnpm --version
 
 # ---- go --------------------------------------------------------------------
 FROM base AS go
@@ -164,6 +174,9 @@ ARG APPIMAGETOOL_SHA256_AMD64=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa3
 ARG MC_VERSION=RELEASE.2025-08-13T08-35-41Z
 # renovate: datasource=rubygems depName=fpm
 ARG FPM_VERSION=1.18.0
+# fpm's pleaserun pins mustache; pleaserun >= 0.0.35 needs mustache >= 1.1.3 (GHSA-5hrj-7fc3-cmx9, RCE).
+# renovate: datasource=rubygems depName=pleaserun
+ARG PLEASERUN_VERSION=0.0.35
 RUN set -eux; \
     curl -fsSL -o /tmp/awscli.zip "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip"; \
     echo "${AWSCLI_SHA256_AMD64}  /tmp/awscli.zip" | sha256sum -c -; \
@@ -173,7 +186,10 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/appimagetool; \
     GOPATH=/tmp/gopath GOCACHE=/tmp/gocache GOBIN=/usr/local/bin GOFLAGS=-trimpath GOTOOLCHAIN=local \
         go install "github.com/minio/mc@${MC_VERSION}"; \
+    gem install --no-document pleaserun -v "${PLEASERUN_VERSION}"; \
     gem install --no-document fpm -v "${FPM_VERSION}"; \
+    ruby -e 'v = Gem::Specification.select { |s| s.name == "mustache" }.map(&:version); \
+        abort("vulnerable mustache: #{v.join(", ")}") if v.any? { |x| x < Gem::Version.new("1.1.3") }'; \
     chmod -R u+w /tmp/gopath; rm -rf /tmp/*; \
     aws --version; mc --version; fpm --version; mvn -v | head -1
 # No root for jobs: sudo is a shim that only checks apt packages are present

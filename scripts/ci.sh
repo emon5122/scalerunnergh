@@ -70,6 +70,18 @@ docker run --rm scalerunnergh-runner:ci > /dev/null 2>&1
 code=$?
 set -e
 [ "${code}" = 64 ] || { echo "expected exit 64 without a JIT config, got ${code}"; exit 1; }
+# The runner's own node dirs ship node alone (their npm bundles vulnerable packages).
+leftover="$(docker run --rm --entrypoint sh scalerunnergh-runner:ci -c \
+    'ls -d /home/runner/externals/node*/lib/node_modules/* /home/runner/externals/node*/bin/np* 2>/dev/null' || true)"
+[ -z "${leftover}" ] || { echo "runner externals still ship npm/corepack:"; echo "${leftover}"; exit 1; }
+docker run --rm --entrypoint sh scalerunnergh-runner:ci -c \
+    'for n in /home/runner/externals/node*/bin/node; do case "$n" in *alpine*) continue ;; esac; "$n" --version; done'
 docker rmi scalerunnergh-runner:ci > /dev/null
+
+step "runner image (node) builds with the pinned npm"
+docker build "${build_args[@]}" -q --target node -t scalerunnergh-runner:ci-node docker/runner
+docker run --rm --entrypoint sh scalerunnergh-runner:ci-node -c \
+    'npm --version && node -p "require(\"/usr/local/lib/node_modules/npm/node_modules/tar/package.json\").version"'
+docker rmi scalerunnergh-runner:ci-node > /dev/null
 
 echo; echo "CI suite passed"
