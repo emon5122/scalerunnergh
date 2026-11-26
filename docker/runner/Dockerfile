@@ -2,9 +2,9 @@
 # per container. Build a flavor with --target (base, node, go, python, media, full, rust).
 #
 # The runner and the language toolchains are pinned by version and sha256 here;
-# bump them through Renovate, never on a host. Ubuntu and Docker packages come
-# from apt at build time (the image tag pins the result).
-FROM ubuntu:24.04 AS base
+# bump them through Renovate, never on a host. Pin the Ubuntu image index for
+# both architectures. Apt still resolves Ubuntu and Docker packages at build time.
+FROM ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG TARGETARCH
@@ -20,7 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
         > /etc/apt/sources.list.d/docker.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade git \
+    && apt-get install -y --no-install-recommends \
         docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
